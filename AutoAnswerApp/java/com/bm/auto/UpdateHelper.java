@@ -65,7 +65,9 @@ public final class UpdateHelper {
                 JSONObject latest = fetchJson("https://api.github.com/repos/"
                         + GH_REPO + "/releases/latest", true);
                 if (latest == null) { cb.onResult(null); return; }
-                int remoteVc = latest.optInt("tag_name", 0);  // 约定 tag 格式: v5 / v6 ...
+                String tagName = latest.optString("tag_name", "");
+                int remoteVc = 0;
+                try { remoteVc = Integer.parseInt(tagName.replaceFirst("^v", "")); } catch (Exception ignore) {}
                 String verName = latest.optString("name", "");
                 String body = latest.optString("body", "");
                 JSONArray assets = latest.optJSONArray("assets");
