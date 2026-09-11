@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">行藏有度</string>
+    <string name="svc_desc">自动识别彬煤智慧课堂考试页题目，查题库自动选择答案并翻页交卷</string>
+</resources>
