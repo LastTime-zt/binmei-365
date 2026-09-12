@@ -658,6 +658,28 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 全局崩溃兜底: 防止未预期的 NPE 直接闪退, 把堆栈显示在屏幕上便于远程定位
+        Thread.setDefaultUncaughtExceptionHandler(new java.lang.Thread.UncaughtExceptionHandler() {
+            @Override public void uncaughtException(java.lang.Thread t, Throwable e) {
+                try {
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    e.printStackTrace(new java.io.PrintWriter(sw));
+                    android.widget.TextView tv = new android.widget.TextView(MainActivity.this);
+                    tv.setText("启动出错(已拦截), 请截图发给管理员:\n\n" + sw);
+                    tv.setTextSize(10);
+                    tv.setTextColor(0xFFCC3333);
+                    tv.setPadding(8, 8, 8, 8);
+                    tv.setTextIsSelectable(true);
+                    android.widget.ScrollView sc = new android.widget.ScrollView(MainActivity.this);
+                    sc.addView(tv);
+                    setContentView(sc);
+                } catch (Throwable ignore) {
+                    // 兜底: 连显示都失败就直接退出
+                }
+                android.os.Process.killProcess(android.os.Process.myPid());
+                System.exit(1);
+            }
+        });
 
         // ---- 授权门禁: 未激活时只显示授权界面 ----
         if (!License.isActive(this)) {
@@ -683,6 +705,8 @@ public class MainActivity extends Activity {
 
     /** 注册码授权界面(激活前唯一界面) */
     private void buildLicenseUi() {
+        // 激活页可能早于 buildMainUi 调用, sp 此时可能为 null, 用本地 SharedPreferences 直取
+        android.content.SharedPreferences s2 = getSharedPreferences("cfg", MODE_PRIVATE);
         float d = den();
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -738,10 +762,10 @@ public class MainActivity extends Activity {
         tvMsg.setTextColor(0xFFCC3333);
         tvMsg.setPadding(0, (int) (12 * d), 0, 0);
         // 上次授权被清除的原因(吊销/换绑冲突等), 显示一次即清除
-        String reason = sp.getString("unbind_reason", "");
+        String reason = s2.getString("unbind_reason", "");
         if (!reason.isEmpty()) {
             tvMsg.setText(reason);
-            sp.edit().remove("unbind_reason").apply();
+            s2.edit().remove("unbind_reason").apply();
         }
         ll.addView(tvMsg);
 
