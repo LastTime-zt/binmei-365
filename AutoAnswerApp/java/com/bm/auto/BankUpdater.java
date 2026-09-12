@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -226,23 +227,7 @@ public class BankUpdater {
                     + " 签到" + signed);
             appendLog("今日进度: 练习" + pPractice + "/15  阅读" + pStudy + "/15  签到" + (signed ? "✓" : "✗"));
 
-            // 1. 随机练习(服务端要求: 练1题后才能签到; 记录上限15条/日, 计分上限10/日)
-            int nPractice = pPractice >= 15 ? 0 : Math.min(10, 15 - pPractice);
-            Result r1;
-            if (nPractice <= 0) {
-                r1 = new Result(true, 0, "今日已满, 跳过");
-                Log.i(TAG, "随机练习 -> 跳过(已有" + pPractice + "条)");
-                appendLog("随机练习: 已满跳过");
-            } else {
-                dailyInfo = "随机练习中...";
-                appendLog("随机练习中(" + nPractice + "题)...");
-                r1 = practice(ctx, nPractice, true);
-                Log.i(TAG, "随机练习 -> " + r1.message);
-                appendLog("随机练习: " + r1.message);
-            }
-            log.append("随机练习: ").append(r1.message).append("\n");
-
-            // 2. 签到
+            // 1. 签到(前端必须先练题, 签到必须在前面)
             Result r2;
             if (signed) {
                 r2 = new Result(true, 1, "今日已签, 跳过");
@@ -257,36 +242,89 @@ public class BankUpdater {
             }
             log.append("签到: ").append(r2.message).append("\n");
 
-            // 3. 阅读(知识学习, 每日上限15篇, 每篇约65秒)
-            int nStudy = Math.max(0, 15 - pStudy);
-            Result r3;
-            if (nStudy <= 0) {
-                r3 = new Result(true, 0, "今日已满15篇, 跳过");
-                Log.i(TAG, "阅读 -> 跳过(已有" + pStudy + "分)");
-                appendLog("阅读: 已满跳过");
-            } else {
-                dailyInfo = "阅读浏览中...(还差" + nStudy + "篇)";
-                appendLog("阅读浏览中(" + nStudy + "篇, 约" + (nStudy * 65 / 60) + "分钟)...");
-                r3 = study(ctx, nStudy);
-                Log.i(TAG, "阅读 -> " + r3.message);
-                appendLog("阅读: " + r3.message);
-            }
-            log.append("阅读: ").append(r3.message).append("\n");
+            // 2&3&4. 并发执行: 随机练习 + 阅读 + 自动答题(4张卷)
+            dailyInfo = "并发执行练习/阅读/答题...";
+            appendLog("并发任务开始: 随机练习 + 阅读 + 自动答题4张");
 
-            // 4. 自动答题4张卷(每日积分补充)
-            dailyInfo = "开始自动答题(4张)...";
-            appendLog("自动答题开始(4张)");
-            examRunning = true;
-            Result r4 = runExamsCore(ctx, 4, null);
-            examRunning = false;
-            examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
-            examInfo = "已结束 · " + r4.message;
-            Log.i(TAG, "自动答题 -> " + r4.message);
-            appendLog("自动答题: " + r4.message);
-            log.append("自动答题: ").append(r4.message).append("\n");
+            final int nStudy = Math.max(0, 15 - pStudy);
+            final int nPractice = pPractice >= 15 ? 0 : Math.min(10, 15 - pPractice);
 
-            appendLog("一键日常完成: 练习" + r1.count + "题  阅读" + r3.count + "篇  答题" + r4.count + "张");
-            return new Result(true, r1.count + r3.count + r4.count, log.toString().trim());
+            final Result[] r1 = {null}, r3 = {null}, r4 = {null};
+            final StringBuilder concurrentLog = new StringBuilder();
+            final Object lock = new Object();
+            CountDownLatch latch = new CountDownLatch(3);
+
+            // 线程1: 随机练习
+            new Thread(() -> {
+                try {
+                    if (nPractice <= 0) {
+                        r1[0] = new Result(true, 0, "今日已满, 跳过");
+                        synchronized (lock) { concurrentLog.append("随机练习: 已满跳过\n"); }
+                    } else {
+                        dailyInfo = "随机练习中(" + nPractice + "题)...";
+                        synchronized (lock) { concurrentLog.append("随机练习中(" + nPractice + "题)...\n"); }
+                        r1[0] = practice(ctx, nPractice, true);
+                        synchronized (lock) { concurrentLog.append("随机练习: ").append(r1[0].message).append("\n"); }
+                        Log.i(TAG, "随机练习 -> " + r1[0].message);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "随机练习异常", e);
+                    r1[0] = new Result(false, 0, "练习失败: " + e.getMessage());
+                    synchronized (lock) { concurrentLog.append("随机练习失败: ").append(e.getMessage()).append("\n"); }
+                } finally { latch.countDown(); }
+            }, "daily-practice").start();
+
+            // 线程2: 阅读浏览
+            new Thread(() -> {
+                try {
+                    if (nStudy <= 0) {
+                        r3[0] = new Result(true, 0, "今日已满15篇, 跳过");
+                        synchronized (lock) { concurrentLog.append("阅读: 已满跳过\n"); }
+                    } else {
+                        dailyInfo = "阅读浏览中...(还差" + nStudy + "篇)";
+                        synchronized (lock) {
+                            concurrentLog.append("阅读浏览中(" + nStudy + "篇, 约" + (nStudy * 65 / 60) + "分钟)...\n");
+                        }
+                        r3[0] = study(ctx, nStudy);
+                        synchronized (lock) { concurrentLog.append("阅读: ").append(r3[0].message).append("\n"); }
+                        Log.i(TAG, "阅读 -> " + r3[0].message);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "阅读异常", e);
+                    r3[0] = new Result(false, 0, "阅读失败: " + e.getMessage());
+                    synchronized (lock) { concurrentLog.append("阅读失败: ").append(e.getMessage()).append("\n"); }
+                } finally { latch.countDown(); }
+            }, "daily-study").start();
+
+            // 线程3: 自动答题4张卷
+            new Thread(() -> {
+                try {
+                    dailyInfo = "开始自动答题(4张)...";
+                    synchronized (lock) { concurrentLog.append("自动答题开始(4张)\n"); }
+                    examRunning = true;
+                    r4[0] = runExamsCore(ctx, 4, null);
+                    examRunning = false;
+                    examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
+                    examInfo = "已结束 · " + r4[0].message;
+                    synchronized (lock) { concurrentLog.append("自动答题: ").append(r4[0].message).append("\n"); }
+                    Log.i(TAG, "自动答题 -> " + r4[0].message);
+                } catch (Exception e) {
+                    Log.e(TAG, "自动答题异常", e);
+                    examRunning = false;
+                    r4[0] = new Result(false, 0, "答题失败: " + e.getMessage());
+                    synchronized (lock) { concurrentLog.append("自动答题失败: ").append(e.getMessage()).append("\n"); }
+                } finally { latch.countDown(); }
+            }, "daily-exam").start();
+
+            // 等待三个任务全部完成
+            try { latch.await(); } catch (InterruptedException ignore) { }
+            synchronized (lock) { log.append(concurrentLog); }
+            appendLog("并发完成: 练习" + (r1[0] != null ? r1[0].count : 0)
+                    + "题  阅读" + (r3[0] != null ? r3[0].count : 0)
+                    + "篇  答题" + (r4[0] != null ? r4[0].count : 0) + "张");
+            return new Result(true, (r1[0] != null ? r1[0].count : 0)
+                    + (r3[0] != null ? r3[0].count : 0)
+                    + (r4[0] != null ? r4[0].count : 0), log.toString().trim());
         } catch (Exception e) {
             Log.e(TAG, "日常任务失败", e);
             appendLog("日常任务失败: " + e.getClass().getSimpleName()
