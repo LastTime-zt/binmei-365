@@ -30,6 +30,10 @@ public class MainActivity extends Activity {
     private android.widget.ProgressBar pbDownload;
     private TextView tvDownloadStatus;
     private android.app.AlertDialog dlDialog;
+    // 更新下载状态: 0=空闲, 1=下载中, 2=下载完成
+    private int mDlState = 0;
+    private UpdateHelper.UpdateInfo mPendingUpdate;
+    private Thread mDlThread;
     private final Handler h = new Handler(Looper.getMainLooper());
     private boolean uiUpdating = false;
     private boolean autoExamChecked = false;
@@ -870,7 +874,23 @@ public class MainActivity extends Activity {
         rowUpd.setOrientation(LinearLayout.HORIZONTAL);
         bUpdateCheck = mkBtn("检查更新 v" + appVersion());
         bUpdateCheck.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { checkUpdate(); }
+            @Override public void onClick(View v) {
+                if (mDlState == 1) {
+                    // 下载中 → 停止
+                    if (mDlThread != null && mDlThread.isAlive()) {
+                        mDlThread.interrupt();
+                    }
+                    mDlState = 0;
+                    resetDlUi();
+                    Toast.makeText(MainActivity.this, "已停止下载", Toast.LENGTH_SHORT).show();
+                } else if (mDlState == 2) {
+                    // 下载完成 → 安装
+                    installPendingApk();
+                } else {
+                    // 空闲 → 检查更新
+                    checkUpdate();
+                }
+            }
         });
         rowUpd.addView(bUpdateCheck);
         ll.addView(rowUpd);
@@ -1231,22 +1251,27 @@ public class MainActivity extends Activity {
 
     /** 检查更新: 查询 GitHub Release, 有新版本时弹出下载对话框 */
     private void checkUpdate() {
+        if (mDlState == 1) return;  // 下载中不响应
+        mDlState = -1; // 检查中(负数表示中间态)
         bUpdateCheck.setEnabled(false);
         bUpdateCheck.setText("检查中...");
         UpdateHelper.checkLatest(this, new UpdateHelper.Callback() {
             @Override public void onResult(UpdateHelper.UpdateInfo info) {
                 bUpdateCheck.setEnabled(true);
-                bUpdateCheck.setText("检查更新 v" + appVersion());
                 if (info == null) {
+                    bUpdateCheck.setText("检查更新 v" + appVersion());
                     Toast.makeText(MainActivity.this, "网络错误，无法获取更新信息",
                             Toast.LENGTH_SHORT).show();
                     return;
                 }
                 if (!info.newer) {
+                    bUpdateCheck.setText("已是最新版 v" + info.remoteVersion);
                     Toast.makeText(MainActivity.this, "当前已是最新版本 (v"
                             + info.remoteVersion + ")", Toast.LENGTH_SHORT).show();
                     return;
                 }
+                mPendingUpdate = info;
+                mDlState = 0;
                 showUpdateDialog(info);
             }
         });
@@ -1318,6 +1343,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "下载地址无效", Toast.LENGTH_SHORT).show();
             return;
         }
+        mDlState = 1;
         final android.content.Context app = getApplicationContext();
         UpdateHelper.Progress prog = new UpdateHelper.Progress() {
             @Override public void onProgress(int pct) {
@@ -1330,30 +1356,30 @@ public class MainActivity extends Activity {
                         tvDownloadStatus.setText("下载中 " + pct + "%");
                         tvDownloadStatus.setVisibility(View.VISIBLE);
                     }
+                    // 同步更新主界面按钮文字
+                    bUpdateCheck.setText("停止下载 " + pct + "%");
                 });
             }
             @Override public void onDone() {
                 new Handler(getMainLooper()).post(() -> {
+                    mDlState = 2;
                     if (tvDownloadStatus != null) {
-                        tvDownloadStatus.setText("下载完成，正在安装...");
+                        tvDownloadStatus.setText("下载完成，等待安装...");
                     }
-                    final File apk = new File(app.getExternalFilesDir(null), "AutoAnswer_update.apk");
-                    // 先关闭 dialog
+                    bUpdateCheck.setText("安装更新");
+                    // 关闭 dialog
                     try { if (dlDialog != null) dlDialog.dismiss(); } catch (Exception ignore) { }
-                    // 安装 APK
-                    if (apk.exists()) {
-                        UpdateHelper.installApk(MainActivity.this, apk);
-                    } else {
-                        Toast.makeText(MainActivity.this, "安装包文件不存在",
-                                Toast.LENGTH_LONG).show();
-                    }
+                    Toast.makeText(MainActivity.this, "下载完成，请点击「安装更新」按钮",
+                            Toast.LENGTH_LONG).show();
                 });
             }
             @Override public void onFail(String msg) {
                 new Handler(getMainLooper()).post(() -> {
+                    mDlState = 0;
                     if (tvDownloadStatus != null) {
                         tvDownloadStatus.setText("下载失败: " + msg);
                     }
+                    resetDlUi();
                     Toast.makeText(MainActivity.this, "下载失败: " + msg,
                             Toast.LENGTH_LONG).show();
                 });
@@ -1366,9 +1392,35 @@ public class MainActivity extends Activity {
                 tvDownloadStatus.setText("准备下载...");
                 tvDownloadStatus.setVisibility(View.VISIBLE);
             }
+            bUpdateCheck.setText("下载中 0%");
         });
         Toast.makeText(this, "开始下载更新...", Toast.LENGTH_SHORT).show();
-        new Thread(() -> UpdateHelper.downloadApk(app, url, prog)).start();
+        mDlThread = new Thread(() -> UpdateHelper.downloadApk(app, url, prog));
+        mDlThread.start();
+    }
+
+    /** 重置下载 UI */
+    private void resetDlUi() {
+        bUpdateCheck.setText("检查更新 v" + appVersion());
+        bUpdateCheck.setEnabled(true);
+        if (pbDownload != null) {
+            pbDownload.setProgress(0);
+            pbDownload.setVisibility(View.GONE);
+        }
+        if (tvDownloadStatus != null) {
+            tvDownloadStatus.setVisibility(View.GONE);
+        }
+    }
+
+    /** 安装已下载的 APK */
+    private void installPendingApk() {
+        final File apk = new File(getApplicationContext().getExternalFilesDir(null),
+                "AutoAnswer_update.apk");
+        if (apk.exists()) {
+            UpdateHelper.installApk(this, apk);
+        } else {
+            Toast.makeText(this, "安装包不存在，请先下载", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void loadBankInfo() {
