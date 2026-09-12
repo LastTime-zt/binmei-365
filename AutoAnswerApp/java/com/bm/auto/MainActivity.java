@@ -1300,11 +1300,15 @@ public class MainActivity extends Activity {
 
         bd.setPositiveButton("立即下载", new android.content.DialogInterface.OnClickListener() {
             @Override public void onClick(android.content.DialogInterface dlg, int which) {
-                try { dlg.dismiss(); } catch (Exception ignore) { }
+                // 不关闭 dialog，让下载进度在此 dialog 中显示
                 startDownload(info.downloadUrl);
             }
         });
-        bd.setNegativeButton("稍后", null);
+        bd.setNegativeButton("稍后", new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface dlg, int which) {
+                try { dlg.dismiss(); } catch (Exception ignore) { }
+            }
+        });
         dlDialog = bd.show();
     }
 
@@ -1317,37 +1321,52 @@ public class MainActivity extends Activity {
         final android.content.Context app = getApplicationContext();
         UpdateHelper.Progress prog = new UpdateHelper.Progress() {
             @Override public void onProgress(int pct) {
-                if (pbDownload != null) {
-                    pbDownload.setProgress(pct);
-                    pbDownload.setVisibility(View.VISIBLE);
-                    tvDownloadStatus.setText("下载中 " + pct + "%");
-                    tvDownloadStatus.setVisibility(View.VISIBLE);
-                }
+                new Handler(getMainLooper()).post(() -> {
+                    if (pbDownload != null) {
+                        pbDownload.setProgress(pct);
+                        pbDownload.setVisibility(View.VISIBLE);
+                    }
+                    if (tvDownloadStatus != null) {
+                        tvDownloadStatus.setText("下载中 " + pct + "%");
+                        tvDownloadStatus.setVisibility(View.VISIBLE);
+                    }
+                });
             }
             @Override public void onDone() {
-                if (tvDownloadStatus != null) {
-                    tvDownloadStatus.setText("下载完成，正在安装...");
-                }
-                final File apk = new File(app.getExternalFilesDir(null), "AutoAnswer_update.apk");
-                try { dlDialog.dismiss(); } catch (Exception ignore) { }
-                // 延迟 500ms 确保 dialog 关闭后再触发安装
-                new Handler(getMainLooper()).postDelayed(() -> {
+                new Handler(getMainLooper()).post(() -> {
+                    if (tvDownloadStatus != null) {
+                        tvDownloadStatus.setText("下载完成，正在安装...");
+                    }
+                    final File apk = new File(app.getExternalFilesDir(null), "AutoAnswer_update.apk");
+                    // 先关闭 dialog
+                    try { if (dlDialog != null) dlDialog.dismiss(); } catch (Exception ignore) { }
+                    // 安装 APK
                     if (apk.exists()) {
-                        UpdateHelper.installApk(app, apk);
+                        UpdateHelper.installApk(MainActivity.this, apk);
                     } else {
                         Toast.makeText(MainActivity.this, "安装包文件不存在",
                                 Toast.LENGTH_LONG).show();
                     }
-                }, 500);
+                });
             }
             @Override public void onFail(String msg) {
-                if (tvDownloadStatus != null) {
-                    tvDownloadStatus.setText("下载失败: " + msg);
-                }
-                Toast.makeText(MainActivity.this, "下载失败: " + msg,
-                        Toast.LENGTH_LONG).show();
+                new Handler(getMainLooper()).post(() -> {
+                    if (tvDownloadStatus != null) {
+                        tvDownloadStatus.setText("下载失败: " + msg);
+                    }
+                    Toast.makeText(MainActivity.this, "下载失败: " + msg,
+                            Toast.LENGTH_LONG).show();
+                });
             }
         };
+        // 初始显示等待状态
+        new Handler(getMainLooper()).post(() -> {
+            if (pbDownload != null) pbDownload.setProgress(0);
+            if (tvDownloadStatus != null) {
+                tvDownloadStatus.setText("准备下载...");
+                tvDownloadStatus.setVisibility(View.VISIBLE);
+            }
+        });
         Toast.makeText(this, "开始下载更新...", Toast.LENGTH_SHORT).show();
         new Thread(() -> UpdateHelper.downloadApk(app, url, prog)).start();
     }
