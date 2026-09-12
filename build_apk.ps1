@@ -6,6 +6,19 @@ $root = "C:\aab_build"
 Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $root | Out-Null
 Copy-Item "$src\AndroidManifest.xml", "$src\res", "$src\java", "$src\assets" $root -Recurse -Force
+
+# 0. PatConfig.java 不入库(含本地 PAT); 缺失时生成空 PAT 版本(绑定上报禁用, 其余功能正常)
+if (!(Test-Path "$root\java\com\bm\auto\PatConfig.java")) {
+    New-Item -ItemType Directory -Force "$root\java\com\bm\auto" | Out-Null
+    Set-Content -Path "$root\java\com\bm\auto\PatConfig.java" -Encoding UTF8 -Value @'
+package com.bm.auto;
+
+/** 本地配置占位(无 PAT): 绑定上报禁用, 其余功能正常。 */
+public final class PatConfig {
+    public static final String BMDB_PAT = "";
+}
+'@
+}
 $sdk  = "$env:LOCALAPPDATA\Android\Sdk"
 $bt   = "$sdk\build-tools\35.0.0"
 $plat = "$sdk\platforms\android-34\android.jar"

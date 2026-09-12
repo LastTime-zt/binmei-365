@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
     private LinearLayout modeBlock;   // 方式一(操作界面)专属权限区块
     private LinearLayout httpBlock;   // 方式二(协议答题)专属区块
     private Runnable refreshPtsRef;   // 积分概况刷新器(任务完成后自动刷新)
+    private TextView tvBindHint;      // 账号绑定提示行(登录成功后刷新)
 
     /** 方式一专属区块: 权限 + 答题设置; 方式二时整体隐藏。每次重建防累积 */
     private void buildModeBlock(LinearLayout block, float d) {
@@ -267,33 +268,66 @@ public class MainActivity extends Activity {
                 new Thread(new Runnable() {
                     @Override public void run() {
                         String err = null;
+                        String bindErr = null;
                         try {
-                            // 清旧登录态强制重登, ensureLogin 用界面账号换取新 pid
+                            // 清旧登录态强制重登, 用界面输入的账号密码直接登录
+                            // (不依赖本地保存的密码, 记住密码关闭时也能登录)
                             sp.edit().remove("login_pid").apply();
                             java.util.Map<String, String> jar = new java.util.HashMap<>();
-                            BankUpdater.ensureLogin(app, jar);
+                            BankUpdater.ensureLogin(app, jar, id, pwd);
                         } catch (Exception e) {
                             err = e.getMessage() != null
                                     ? e.getMessage()
                                     : e.getClass().getSimpleName();
                         }
+                        // 云端双向绑定: 首次绑定(bind_idcard 为空)时上报账号/密码,
+                        // 云端已绑定其他账号则拒绝(CONFLICT)
+                        if (err == null
+                                && sp.getString("bind_idcard", "").isEmpty()) {
+                            String lic = sp.getString("license", "");
+                            if (!lic.isEmpty()) {
+                                String br = License.cloudBind(lic, id, pwd);
+                                if (br != null && br.startsWith("CONFLICT")) {
+                                    bindErr = "该注册码已在云端绑定其他账号 ("
+                                            + maskId(License.cloudLookup(lic)[3])
+                                            + "), 如需换绑请联系管理员";
+                                }
+                            }
+                        }
                         final String fErr = err;
+                        final String fBind = bindErr;
                         h.post(new Runnable() {
                             @Override public void run() {
                                 bLogin.setEnabled(true);
                                 bLogin.setText("登 录");
                                 if (fErr != null) {
+                                    // 登录失败也要清掉"正在登录..."状态
+                                    BankUpdater.examInfo = "";
                                     Toast.makeText(MainActivity.this,
                                             "登录失败: " + fErr,
                                             Toast.LENGTH_LONG).show();
+                                } else if (fBind != null) {
+                                    // 登录成功但云端绑定冲突: 不写本地绑定
+                                    BankUpdater.examInfo = "";
+                                    Toast.makeText(MainActivity.this, fBind,
+                                            Toast.LENGTH_LONG).show();
                                 } else {
                                     // 记录登录成功的账号, 供答题一致性校验
-                                    sp.edit().putString("login_idcard", id)
-                                            .putString("bind_idcard",
-                                                    sp.getString("bind_idcard", "")
-                                                            .isEmpty() ? id
-                                                            : sp.getString("bind_idcard", ""))
-                                            .apply();
+                                    boolean remember = sp.getBoolean("remember_pwd", true);
+                                    android.content.SharedPreferences.Editor ed = sp.edit()
+                                            .putString("login_idcard", id)
+                                            .putString("idcard", id);
+                                    if (remember) ed.putString("password", pwd);
+                                    String bound = sp.getString("bind_idcard", "");
+                                    if (bound.isEmpty()) bound = id;
+                                    ed.putString("bind_idcard", bound).apply();
+                                    // 刷新绑定账号提示 + 清除"正在登录..."状态
+                                    if (tvBindHint != null) {
+                                        tvBindHint.setText("已绑定账号: "
+                                                + maskId(bound) + " (不可更换)");
+                                        tvBindHint.setTextColor(0xFF1B8A3A);
+                                    }
+                                    BankUpdater.examInfo = "";
                                     Toast.makeText(MainActivity.this,
                                             "登录成功", Toast.LENGTH_SHORT).show();
                                     // 刷新所有信息: 积分概况 + 用户信息 + 标题公司名
@@ -308,6 +342,7 @@ public class MainActivity extends Activity {
         cardAcc.addView(bLogin);
 
         TextView tvSaveHint = new TextView(this);
+        tvBindHint = tvSaveHint;   // 字段引用, 登录成功后刷新绑定提示
         tvSaveHint.setTextSize(12);
         tvSaveHint.setTextColor(0xFF8A94A0);
         tvSaveHint.setPadding(0, (int) (4 * d), 0, 0);
@@ -552,7 +587,7 @@ public class MainActivity extends Activity {
     /** 刷新授权状态行: 到期时间 + 剩余天数, <=7天橙色提醒 */
     private void updateLicenseText() {
         if (tvLicense == null) return;
-        String ver = "v" + appVersion();
+        String ver = "v" + appVersionName();
         String exp = License.expires(this);
         if (exp == null) {
             tvLicense.setText(ver + " · 授权状态: ✗ 未激活");
@@ -571,29 +606,20 @@ public class MainActivity extends Activity {
             tvLicense.setTextColor(0xFF1B8A3A);
         }
         tvLicense.setText(text);
-        // 点击授权行(含"即将到期, 请续费") -> 弹出联系方式二维码 + 设备码复制
+        // 点击授权行 -> 弹出设备码复制
         tvLicense.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { showContactDialog(); }
+            @Override public void onClick(View v) { showDeviceDialog(); }
         });
     }
 
-    /** 联系方式弹窗: 微信二维码 + 设备码一键复制 */
-    private void showContactDialog() {
+    /** 设备码弹窗: 设备码一键复制(发给管理员生成注册码) */
+    private void showDeviceDialog() {
         float d = den();
         android.app.AlertDialog.Builder bd = new android.app.AlertDialog.Builder(this);
-        bd.setTitle("联系方式 (微信扫码添加)");
+        bd.setTitle("本机设备码");
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding((int) (20 * d), (int) (10 * d), (int) (20 * d), (int) (16 * d));
-
-        android.widget.ImageView iv = new android.widget.ImageView(this);
-        iv.setImageResource(R.drawable.contact_qr);
-        android.widget.LinearLayout.LayoutParams lpIv = new android.widget.LinearLayout.LayoutParams(
-                (int) (240 * d), (int) (300 * d));
-        lpIv.gravity = Gravity.CENTER;
-        iv.setLayoutParams(lpIv);
-        iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-        box.addView(iv);
 
         TextView tvDev = new TextView(this);
         tvDev.setText("设备码: " + License.deviceId(this));
@@ -639,18 +665,20 @@ public class MainActivity extends Activity {
             return;
         }
         buildMainUi();
+        // 后台复查服务器吊销状态: blocked 则回到激活界面
+        final android.content.Context ctx = this;
+        new Thread(() -> {
+            License.revalidate(ctx);
+            if (!License.isActive(ctx)) {
+                runOnUiThread(this::recreate);
+            }
+        }).start();
         // 延迟 2s 检查更新，避免 UI 未完全就绪时操作 dialog
         new Handler(getMainLooper()).postDelayed(this::onCheckUpdateReady, 2000);
         // 打开 APP 自动更新一次题库(已保存账号才触发; 延迟4s避让版本更新弹窗)
         if (!sp.getString("idcard", "").isEmpty()) {
             new Handler(getMainLooper()).postDelayed(this::triggerBankUpdate, 4000);
         }
-    }
-
-    /** yyMMdd -> yyyy-MM-dd */
-    private static String curFmt(String exp) {
-        return exp.substring(0, 2) + "-" + exp.substring(2, 4)
-                + "-" + exp.substring(4, 6);
     }
 
     /** 注册码授权界面(激活前唯一界面) */
@@ -709,50 +737,68 @@ public class MainActivity extends Activity {
         tvMsg.setTextSize(13);
         tvMsg.setTextColor(0xFFCC3333);
         tvMsg.setPadding(0, (int) (12 * d), 0, 0);
+        // 上次授权被清除的原因(吊销/换绑冲突等), 显示一次即清除
+        String reason = sp.getString("unbind_reason", "");
+        if (!reason.isEmpty()) {
+            tvMsg.setText(reason);
+            sp.edit().remove("unbind_reason").apply();
+        }
         ll.addView(tvMsg);
 
         Button bAct = mkBtn("激 活", true);
         bAct.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                String cur = License.expires(MainActivity.this);
-                String err = License.activate(MainActivity.this,
-                        etLic.getText().toString());
-                if (err == null) {
-                    String now = License.expires(MainActivity.this);
-                    String msg = "激活成功";
-                    if (cur != null && now != null && !cur.equals(now)) {
-                        msg += "\n到期时间已从 20" + curFmt(cur)
-                                + " 更新为 20" + curFmt(now)
-                                + " (覆盖旧码, 不累加)";
-                    }
-                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
-                    recreate();   // 重建进入主界面
-                } else {
-                    tvMsg.setText("激活失败: " + err);
-                    Toast.makeText(MainActivity.this, "激活失败: " + err,
-                            Toast.LENGTH_LONG).show();
+                final String input = etLic.getText().toString();
+                if (input.trim().isEmpty()) {
+                    tvMsg.setText("请输入注册码");
+                    return;
                 }
+                bAct.setEnabled(false);
+                tvMsg.setText("正在连接激活服务器...");
+                new Thread(() -> {
+                    String[] r = License.cloudLookup(input);
+                    String rs = r[0];
+                    String err = null;
+                    if (License.RS_UNREACHABLE.equals(rs)) {
+                        err = "无法连接激活服务器, 请检查网络后重试";
+                    } else if (License.RS_MISSING.equals(rs)) {
+                        err = "注册码未在服务器登记, 请联系管理员";
+                    } else if (License.RS_BLOCKED.equals(rs)) {
+                        err = "注册码已被停用";
+                    } else if (!r[2].equalsIgnoreCase(License.deviceId(MainActivity.this))) {
+                        err = "注册码与本机设备不匹配";
+                    } else if (r[1].length() != 6) {
+                        err = "服务器数据异常, 请联系管理员";
+                    } else if (r[1].compareTo(new java.text.SimpleDateFormat(
+                            "yyMMdd", java.util.Locale.US).format(new java.util.Date())) < 0) {
+                        err = "注册码已过期";
+                    }
+                    if (err == null) {
+                        License.save(MainActivity.this, input, r[1]);
+                        long days = (License.ymdPublic(r[1])
+                                - System.currentTimeMillis()) / 86400000L;
+                        runOnUiThread(() -> {
+                            Toast.makeText(MainActivity.this,
+                                    "激活成功\n到期: 20" + r[1].substring(0, 2)
+                                            + "-" + r[1].substring(2, 4)
+                                            + "-" + r[1].substring(4, 6)
+                                            + " (剩余" + days + "天)",
+                                    Toast.LENGTH_LONG).show();
+                            recreate();
+                        });
+                    } else {
+                        final String fail = err;
+                        runOnUiThread(() -> {
+                            bAct.setEnabled(true);
+                            tvMsg.setText("激活失败: " + fail);
+                            Toast.makeText(MainActivity.this, "激活失败: " + fail,
+                                    Toast.LENGTH_LONG).show();
+                        });
+                    }
+                }).start();
             }
         });
         ll.addView(bAct);
-
-        // 底部联系方式: 微信二维码
-        TextView tvContact = new TextView(this);
-        tvContact.setText("购买/续费请加微信 (扫码)");
-        tvContact.setTextSize(13);
-        tvContact.setTextColor(0xFF8A94A0);
-        tvContact.setGravity(Gravity.CENTER);
-        tvContact.setPadding(0, (int) (22 * d), 0, (int) (6 * d));
-        ll.addView(tvContact);
-
-        android.widget.ImageView ivQr = new android.widget.ImageView(this);
-        ivQr.setImageResource(R.drawable.contact_qr);
-        android.widget.LinearLayout.LayoutParams lpQr = new android.widget.LinearLayout.LayoutParams(
-                (int) (200 * d), (int) (250 * d));
-        lpQr.gravity = Gravity.CENTER;
-        ivQr.setLayoutParams(lpQr);
-        ivQr.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-        ll.addView(ivQr);
 
         setContentView(root);
     }
@@ -780,9 +826,9 @@ public class MainActivity extends Activity {
         ll.addView(tvLicense);
         updateLicenseText();
 
-        // 授权行右侧"联系方式"链接: 点击弹二维码 + 设备码
+        // 授权行右侧"设备码"链接: 点击弹设备码复制
         TextView tvContactLink = new TextView(this);
-        tvContactLink.setText("联系方式");
+        tvContactLink.setText("设备码");
         tvContactLink.setTextSize(13);
         tvContactLink.setTextColor(0xFF1A66C2);
         tvContactLink.getPaint().setUnderlineText(true);
@@ -793,7 +839,7 @@ public class MainActivity extends Activity {
         lpCl.topMargin = (int) (-20 * d);
         tvContactLink.setLayoutParams(lpCl);
         tvContactLink.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { showContactDialog(); }
+            @Override public void onClick(View v) { showDeviceDialog(); }
         });
         ll.addView(tvContactLink);
 
@@ -1270,12 +1316,17 @@ public class MainActivity extends Activity {
             @Override public void onResult(UpdateHelper.UpdateInfo info) {
                 bUpdateCheck.setEnabled(true);
                 if (info == null) {
-                    bUpdateCheck.setText("检查更新 v" + appVersion());
+                    bUpdateCheck.setText("检查更新 v" + appVersionName());
                     Toast.makeText(MainActivity.this, "网络错误，无法获取更新信息",
                             Toast.LENGTH_SHORT).show();
                     return;
                 }
                 if (!info.newer) {
+                    // 兜底: 若之前残留"下载完成待安装"状态但远端已不比本机新, 清状态删包
+                    if (sp.getInt("dl_state", 0) == 2
+                            && appVersion() >= info.remoteVersion) {
+                        clearDlState();
+                    }
                     bUpdateCheck.setText("已是最新版 " + info.remoteVerName);
                     Toast.makeText(MainActivity.this, "当前已是最新版本 (" + info.remoteVerName + ")",
                             Toast.LENGTH_SHORT).show();
@@ -1374,7 +1425,11 @@ public class MainActivity extends Activity {
             @Override public void onDone() {
                 new Handler(getMainLooper()).post(() -> {
                     mDlState = 2;
-                    sp.edit().putInt("dl_state", 2).apply();
+                    // 记录目标版本, 启动时若已装到该版本则清状态并删安装包
+                    int target = mPendingUpdate != null
+                            ? mPendingUpdate.remoteVersion : 0;
+                    sp.edit().putInt("dl_state", 2)
+                            .putInt("dl_target_ver", target).apply();
                     if (tvDownloadStatus != null) {
                         tvDownloadStatus.setText("下载完成，等待安装...");
                     }
@@ -1439,10 +1494,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 重启后恢复下载完成状态，提示安装 */
+    /** 重启后恢复下载完成状态，提示安装; 已装到目标版本则清状态删安装包 */
     private void onCheckUpdateReady() {
         int savedState = sp.getInt("dl_state", 0);
         if (savedState == 2) {
+            int target = sp.getInt("dl_target_ver", 0);
+            if (target > 0 && appVersion() >= target) {
+                // 安装已生效: 清状态 + 自动删除安装包
+                clearDlState();
+                Toast.makeText(this, "更新已安装完成", Toast.LENGTH_SHORT).show();
+                checkUpdate();
+                return;
+            }
             // 上次下载完成，直接提示安装
             bUpdateCheck.setEnabled(true);
             bUpdateCheck.setText("安装更新");
@@ -1450,6 +1513,18 @@ public class MainActivity extends Activity {
             return;
         }
         checkUpdate();
+    }
+
+    /** 清除下载状态并删除已下载的安装包 */
+    private void clearDlState() {
+        sp.edit().putInt("dl_state", 0).remove("dl_target_ver").apply();
+        mDlState = 0;
+        resetDlUi();
+        // 两个可能位置都删
+        new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS), "AutoAnswer_update.apk").delete();
+        new File(getApplicationContext().getExternalFilesDir(null),
+                "AutoAnswer_update.apk").delete();
     }
 
     private void loadBankInfo() {

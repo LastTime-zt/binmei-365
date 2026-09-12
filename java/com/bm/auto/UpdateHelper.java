@@ -54,41 +54,90 @@ public final class UpdateHelper {
     }
 
     /**
-     * 后台请求 GitHub 最新 Release, 回调返回 UpdateInfo
+     * 后台请求 GitHub 最新 Release, 回调返回 UpdateInfo。
+     * 优先走 API; API 被墙时回退 releases/latest/download 302 重定向解析 tag(同样带镜像)。
      */
     public static void checkLatest(Activity act, Callback cb) {
         new Thread(() -> {
-            try {
-                JSONObject latest = fetchJson("https://api.github.com/repos/"
-                        + GH_REPO + "/releases/latest");
-                if (latest == null) { postMain(act, () -> cb.onResult(null)); return; }
-                String tagName = latest.optString("tag_name", "");
-                int remoteVc = 0;
-                try {
-                    String num = tagName.replaceFirst("^v", "").replaceAll("[^0-9]", "");
-                    remoteVc = Integer.parseInt(num);
-                } catch (Exception ignore) {}
-                String verName = latest.optString("name", "");
-                String body = latest.optString("body", "");
-                JSONArray assets = latest.optJSONArray("assets");
-                String dlUrl = "";
-                long size = 0;
-                for (int i = 0; i < assets.length(); i++) {
-                    JSONObject a = assets.getJSONObject(i);
-                    if (a.optString("name", "").endsWith(".apk")) {
-                        dlUrl = a.optString("browser_download_url");
-                        size = a.optLong("size", 0);
-                        break;
-                    }
-                }
-                int localVc = getLocalVersionCode(act.getApplicationContext());
-                final UpdateInfo info = new UpdateInfo(remoteVc, verName, size, dlUrl, body,
-                        remoteVc > localVc);
-                postMain(act, () -> cb.onResult(info));
-            } catch (Exception e) {
-                postMain(act, () -> cb.onResult(null));
-            }
+            UpdateInfo info = checkViaApi(act);
+            if (info == null) info = checkViaRedirect(getLocalVersionCode(act));
+            final UpdateInfo f = info;
+            postMain(act, () -> cb.onResult(f));
         }).start();
+    }
+
+    /** 方式一: GitHub API 查询最新 Release */
+    private static UpdateInfo checkViaApi(Activity act) {
+        try {
+            JSONObject latest = fetchJson("https://api.github.com/repos/"
+                    + GH_REPO + "/releases/latest");
+            if (latest == null) return null;
+            String tagName = latest.optString("tag_name", "");
+            int remoteVc = 0;
+            try {
+                String num = tagName.replaceFirst("^v", "").replaceAll("[^0-9]", "");
+                remoteVc = Integer.parseInt(num);
+            } catch (Exception ignore) {}
+            String verName = latest.optString("name", "");
+            String body = latest.optString("body", "");
+            JSONArray assets = latest.optJSONArray("assets");
+            String dlUrl = "";
+            long size = 0;
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject a = assets.getJSONObject(i);
+                if (a.optString("name", "").endsWith(".apk")) {
+                    dlUrl = a.optString("browser_download_url");
+                    size = a.optLong("size", 0);
+                    break;
+                }
+            }
+            int localVc = getLocalVersionCode(act.getApplicationContext());
+            return new UpdateInfo(remoteVc, verName, size, dlUrl, body,
+                    remoteVc > localVc);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 方式二(API 不通时兜底): releases/latest/download 固定资产名 302 跳转,
+     * 从 Location 头解析 tag 得到版本号。下载仍走 downloadApk 的镜像列表。
+     */
+    private static UpdateInfo checkViaRedirect(int localVc) {
+        String asset = GH_REPO + "/releases/latest/download/AutoAnswer.apk";
+        String[] probes = {
+                "https://github.com/" + asset,
+                "https://ghfast.top/https://github.com/" + asset,
+                "https://mirror.ghproxy.com/https://github.com/" + asset,
+                "https://gh-proxy.com/https://github.com/" + asset
+        };
+        for (String u : probes) {
+            try {
+                HttpURLConnection con = (HttpURLConnection) new URL(u).openConnection();
+                con.setRequestProperty("User-Agent", "Mozilla/5.0");
+                con.setInstanceFollowRedirects(false);   // 只取第一跳 Location
+                con.setConnectTimeout(10000);
+                con.setReadTimeout(10000);
+                con.setRequestMethod("HEAD");
+                int code = con.getResponseCode();
+                String loc = con.getHeaderField("Location");
+                con.disconnect();
+                if (code < 300 || code >= 400 || loc == null) continue;
+                if (loc.startsWith("/")) loc = "https://github.com" + loc;
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("/releases/download/(v\\d+)/")
+                        .matcher(loc);
+                if (!m.find()) continue;
+                int remoteVc = Integer.parseInt(m.group(1).replaceFirst("^v", ""));
+                // 下载地址: 固定资产名直链(直连+镜像由 downloadApk 处理)
+                String dl = "https://github.com/" + asset;
+                return new UpdateInfo(remoteVc, "v" + remoteVc, 0, dl,
+                        "最新版本 v" + remoteVc, remoteVc > localVc);
+            } catch (Exception ignore) {
+                // 尝试下一个镜像
+            }
+        }
+        return null;
     }
 
     /** 在主线程执行 runnable */
