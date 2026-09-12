@@ -1,0 +1,10 @@
+# APK 和构建产物
+*.apk
+*.aab
+build/
+app/build/
+.idea/
+*.iml
+
+# 调试密钥
+debug.keystore
