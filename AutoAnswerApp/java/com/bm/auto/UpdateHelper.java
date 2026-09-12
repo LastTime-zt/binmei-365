@@ -137,11 +137,12 @@ public final class UpdateHelper {
     /** 下载完成后启动安装 Intent */
     public static void installApk(Context ctx, File apk) {
         if (apk == null || !apk.exists()) return;
-        Uri uri = Uri.fromFile(apk);
-        Intent intent = new Intent(Intent.ACTION_VIEW);
-        intent.setDataAndType(uri, "application/vnd.android.package-archive");
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        // Android 7.0+ 禁止通过 file:// URI 共享文件，必须使用 FileProvider
+        Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                ctx, ctx.getPackageName() + ".fileprovider", apk);
+        Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+        intent.setData(uri);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         ctx.startActivity(intent);
     }
 
