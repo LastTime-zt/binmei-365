@@ -271,10 +271,22 @@ public class BankUpdater {
                 Log.i(TAG, "阅读 -> " + r3.message);
                 appendLog("阅读: " + r3.message);
             }
-            log.append("阅读: ").append(r3.message);
+            log.append("阅读: ").append(r3.message).append("\n");
 
-            appendLog("一键日常完成: 练习" + r1.count + "题  阅读" + r3.count + "篇");
-            return new Result(true, r1.count + r3.count, log.toString().trim());
+            // 4. 自动答题4张卷(每日积分补充)
+            dailyInfo = "开始自动答题(4张)...";
+            appendLog("自动答题开始(4张)");
+            examRunning = true;
+            Result r4 = runExamsCore(ctx, 4, null);
+            examRunning = false;
+            examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
+            examInfo = "已结束 · " + r4.message;
+            Log.i(TAG, "自动答题 -> " + r4.message);
+            appendLog("自动答题: " + r4.message);
+            log.append("自动答题: ").append(r4.message).append("\n");
+
+            appendLog("一键日常完成: 练习" + r1.count + "题  阅读" + r3.count + "篇  答题" + r4.count + "张");
+            return new Result(true, r1.count + r3.count + r4.count, log.toString().trim());
         } catch (Exception e) {
             Log.e(TAG, "日常任务失败", e);
             appendLog("日常任务失败: " + e.getClass().getSimpleName()
@@ -860,6 +872,16 @@ public class BankUpdater {
         if (examRunning) return new Result(false, 0, "答题已在进行中");
         examRunning = true;
         acquireWakeLock(ctx);
+        Result ret = runExamsCore(ctx, limit, paperId);
+        releaseWakeLock();
+        examRunning = false;
+        examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
+        examInfo = "已结束 · " + ret.message;
+        return ret;
+    }
+
+    /** 答题核心逻辑(不管理 WakeLock/examRunning, 供 dailyTasks 内部调用) */
+    private static Result runExamsCore(Context ctx, int limit, String paperId) {
         sCtx = ctx.getApplicationContext();
         String desc = paperId != null
                 ? "指定试卷模式"
@@ -868,8 +890,7 @@ public class BankUpdater {
         SharedPreferences sp = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE);
         examPaper = paperId != null ? sp.getString("exam_paper_name", "") : "";
         examQNum = 0; examQTotal = 0; examAnswer = "";
-        answerDelayMs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
-                .getInt("answer_delay", 1) * 1000;
+        answerDelayMs = sp.getInt("answer_delay", 1) * 1000;
         Result ret = null;
         try {
             Map<String, String> jar = new HashMap<>();
@@ -964,12 +985,7 @@ public class BankUpdater {
                     + (e.getMessage() != null ? " " + e.getMessage() : ""));
             ret = new Result(false, 0, "答题失败: " + e.getClass().getSimpleName()
                     + (e.getMessage() != null ? " " + e.getMessage() : ""));
-        } finally {
-            releaseWakeLock();
-            examRunning = false;
-            examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
         }
-        examInfo = "已结束 · " + ret.message;
         return ret;
     }
 
