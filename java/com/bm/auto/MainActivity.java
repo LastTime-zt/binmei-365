@@ -522,6 +522,15 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 本机版本名(用于界面显示, 如 11) */
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
     /** 运行状态卡显隐: 仅方式一(操作界面答题)显示 */
     private void syncRunCardVisibility() {
         if (cardRunView != null) {
@@ -873,7 +882,7 @@ public class MainActivity extends Activity {
         // 检查更新按钮(两方式共用, 始终显示)
         LinearLayout rowUpd = new LinearLayout(this);
         rowUpd.setOrientation(LinearLayout.HORIZONTAL);
-        bUpdateCheck = mkBtn("检查更新 v" + appVersion());
+        bUpdateCheck = mkBtn("检查更新 v" + appVersionName());
         bUpdateCheck.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (mDlState == 1) {
@@ -1267,9 +1276,9 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (!info.newer) {
-                    bUpdateCheck.setText("已是最新版 v" + info.remoteVersion);
-                    Toast.makeText(MainActivity.this, "当前已是最新版本 (v"
-                            + info.remoteVersion + ")", Toast.LENGTH_SHORT).show();
+                    bUpdateCheck.setText("已是最新版 " + info.remoteVerName);
+                    Toast.makeText(MainActivity.this, "当前已是最新版本 (" + info.remoteVerName + ")",
+                            Toast.LENGTH_SHORT).show();
                     return;
                 }
                 mPendingUpdate = info;
@@ -1283,7 +1292,7 @@ public class MainActivity extends Activity {
     private void showUpdateDialog(final UpdateHelper.UpdateInfo info) {
         float d = den();
         android.app.AlertDialog.Builder bd = new android.app.AlertDialog.Builder(this);
-        bd.setTitle("发现新版本 v" + info.remoteVersion);
+        bd.setTitle("发现新版本 " + info.remoteVerName);
 
         // 内容区
         LinearLayout box = new LinearLayout(this);
@@ -1405,7 +1414,7 @@ public class MainActivity extends Activity {
 
     /** 重置下载 UI */
     private void resetDlUi() {
-        bUpdateCheck.setText("检查更新 v" + appVersion());
+        bUpdateCheck.setText("检查更新 v" + appVersionName());
         bUpdateCheck.setEnabled(true);
         if (pbDownload != null) {
             pbDownload.setProgress(0);
