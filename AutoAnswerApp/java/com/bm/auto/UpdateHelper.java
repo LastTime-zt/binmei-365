@@ -30,10 +30,8 @@ import java.util.zip.GZIPInputStream;
  */
 public final class UpdateHelper {
 
-    // GitHub 仓库 & Token
+    // GitHub 仓库
     private static final String GH_REPO = "LastTime-zt/binmei-365";
-    private static final String GH_TOKEN =
-            "YOUR_GH_TOKEN_HERE";
 
     // 本地代理列表(按优先级尝试), 带账号密码的会先试无认证的, 失败再试认证的
     private static final String PROXY_HOST1 = "192.168.1.7";
@@ -73,10 +71,15 @@ public final class UpdateHelper {
      * 后台请求 GitHub 最新 Release, 回调返回 UpdateInfo
      */
     public static void checkLatest(Activity act, Callback cb) {
+        checkLatest(act, act.getSharedPreferences("cfg", Activity.MODE_PRIVATE)
+                .getString("gh_token", ""), cb);
+    }
+
+    public static void checkLatest(Activity act, String token, Callback cb) {
         new Thread(() -> {
             try {
                 JSONObject latest = fetchJson("https://api.github.com/repos/"
-                        + GH_REPO + "/releases/latest", true);
+                        + GH_REPO + "/releases/latest", token);
                 if (latest == null) { postMain(act, () -> cb.onResult(null)); return; }
                 String tagName = latest.optString("tag_name", "");
                 int remoteVc = 0;
@@ -205,16 +208,16 @@ public final class UpdateHelper {
         return con;
     }
 
-    private static JSONObject fetchJson(String urlStr, boolean auth) throws Exception {
+    private static JSONObject fetchJson(String urlStr, String token) throws Exception {
         HttpURLConnection con = newConn(new URL(urlStr));
         con.setRequestProperty("Accept", "application/vnd.github.v3+json");
-        if (auth) con.setRequestProperty("Authorization", "Bearer " + GH_TOKEN);
+        if (token != null && !token.isEmpty()) con.setRequestProperty("Authorization", "Bearer " + token);
         int code = con.getResponseCode();
         if (code == 407) {
             // 代理需要认证, 重试带认证的
             con = newConnAuth(new URL(urlStr));
             con.setRequestProperty("Accept", "application/vnd.github.v3+json");
-            if (auth) con.setRequestProperty("Authorization", "Bearer " + GH_TOKEN);
+            if (token != null && !token.isEmpty()) con.setRequestProperty("Authorization", "Bearer " + token);
             code = con.getResponseCode();
         }
         if (code != 200) return null;

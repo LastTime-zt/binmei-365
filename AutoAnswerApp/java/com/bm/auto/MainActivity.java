@@ -313,6 +313,27 @@ public class MainActivity extends Activity {
         tvSaveHint.setTextColor(boundId.isEmpty() ? 0xFF8A94A0 : 0xFF1B8A3A);
         cardAcc.addView(tvSaveHint);
 
+        // GitHub Token 输入(用于自动更新检查/下载, 不保存明文)
+        TextView tvGhTok = new TextView(this);
+        tvGhTok.setTextSize(12);
+        tvGhTok.setTextColor(0xFF8A94A0);
+        tvGhTok.setPadding(0, (int) (8 * d), 0, 0);
+        tvGhTok.setText("GitHub Token(留空则禁用自动检查):\n格式: github_pat_xxxxxxxxxxxx");
+        cardAcc.addView(tvGhTok);
+        final android.widget.EditText etGhTok = mkInput();
+        etGhTok.setHint("github_pat_...");
+        etGhTok.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        etGhTok.setText(sp.getString("gh_token", ""));
+        cardAcc.addView(etGhTok);
+        etGhTok.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void afterTextChanged(android.text.Editable s) {
+                sp.edit().putString("gh_token", s.toString().trim()).apply();
+            }
+        });
+
         // 题库定时更新卡
         LinearLayout cardUpd = mkCard(block, "题库定时更新");
         LinearLayout rowUpd = new LinearLayout(this);
