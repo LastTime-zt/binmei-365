@@ -1390,8 +1390,13 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onUpgrade(SQLiteDatabase d, int oldVer, int newVer) {
-            if (oldVer < 2)
-                d.execSQL("ALTER TABLE hist ADD COLUMN note TEXT");
+            if (oldVer < 2) {
+                try {
+                    d.execSQL("ALTER TABLE hist ADD COLUMN note TEXT");
+                } catch (Exception ignore) {
+                    // 列已存在(旧版已带该列/重复升级), 忽略
+                }
+            }
         }
     }
 }
