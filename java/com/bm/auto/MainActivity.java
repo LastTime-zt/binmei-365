@@ -1504,7 +1504,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 安装已下载的 APK */
+    /** 安装已下载的 APK; 启动后直接清状态(不管安装是否成功, 下次启动自动验证) */
     private void installPendingApk() {
         File apk = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                 "AutoAnswer_update.apk");
@@ -1513,8 +1513,13 @@ public class MainActivity extends Activity {
         }
         if (apk.exists()) {
             UpdateHelper.installApk(this, apk);
-        } else {
+        }
+        // 无论下载/安装是否成功, 都清状态; 下次启动时 onCheckUpdateReady 会对比版本并决定是否重下
+        clearDlState();
+        if (!apk.exists()) {
             Toast.makeText(this, "安装包不存在，请先下载", Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, "正在安装, 请稍候...", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1543,6 +1548,7 @@ public class MainActivity extends Activity {
     private void clearDlState() {
         sp.edit().putInt("dl_state", 0).remove("dl_target_ver").apply();
         mDlState = 0;
+        // 立即刷新按钮文字, 避免残留"安装更新"或"检测到上次下载已完成"的提示
         resetDlUi();
         // 两个可能位置都删
         new File(Environment.getExternalStoragePublicDirectory(
