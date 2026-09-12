@@ -164,14 +164,18 @@ public final class UpdateHelper {
         }
     }
 
-    /** 下载完成后启动安装 Intent */
+    /** 下载完成后启动安装 Intent (content:// URI, 避免 FileUriExposedException) */
     public static void installApk(Context ctx, File apk) {
         if (apk == null || !apk.exists()) return;
-        Uri uri = Uri.fromFile(apk);
-        Intent intent = new Intent(Intent.ACTION_VIEW);
+        Uri uri = Uri.parse("content://com.bm.auto.apk/download/" + apk.getName());
+        Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
         intent.setDataAndType(uri, "application/vnd.android.package-archive");
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        ctx.startActivity(intent);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            ctx.startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(ctx, "无法启动安装: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     // ---- 内部辅助 ----
