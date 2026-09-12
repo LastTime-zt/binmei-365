@@ -25,6 +25,8 @@ public class MainActivity extends Activity {
 
     private TextView tvA11y, tvOverlay, tvProgress, tvInfo, tvDaily, tvExam, tvLicense, tvTitle;
     private Button bPause, bSubmit, bUpdateCheck;
+    private LinearLayout cardRunView;   // 运行状态卡(仅方式一显示)
+    private TextView tvLog;             // 答题日志
     private android.widget.ProgressBar pbDownload;
     private TextView tvDownloadStatus;
     private android.app.AlertDialog dlDialog;
@@ -135,6 +137,8 @@ public class MainActivity extends Activity {
                         final BankUpdater.PersonInfo me = BankUpdater.personInfo(app);
                         final int pStudy = done.optInt("知识学习", 0);
                         final int pPractice = done.optInt("手机练习", 0);
+                        final int[] exStat = BankUpdater.examStatToday(app);
+                        final int unN = BankUpdater.countUnfinished(app);
                         h.post(new Runnable() {
                             @Override public void run() {
                                 if (info == null) {
@@ -145,6 +149,9 @@ public class MainActivity extends Activity {
                                             ? me.name + "    " + maskId(me.idcard)
                                             + "    " + me.tel + "\n"
                                             : "";
+                                    String unText = unN < 0 ? ""
+                                            : (unN == 0 ? "    无未交卷"
+                                                        : "    ⚠ 未交卷 " + unN + " 张");
                                     tvPts.setText(head
                                             + "总积分: " + info.total
                                             + "    今日: +" + info.todayPoints
@@ -153,14 +160,20 @@ public class MainActivity extends Activity {
                                             + "    明日签到: +" + info.nextPoint
                                             + "\n今日阅读: " + pStudy + "/15 篇"
                                             + "    今日练习: " + pPractice + "/15 次 ("
-                                            + info.practiced + " 题)");
+                                            + info.practiced + " 题)"
+                                            + "\n今日答卷: " + exStat[0] + " 张"
+                                            + "    答卷得分: " + exStat[1] + " 分"
+                                            + unText
+                                            + "\n最近答卷:\n" + BankUpdater.lastScoresText());
                                     tvPts.setTextColor(0xFF444444);
                                 }
-                                // 标题公司名动态更新
+                                // 标题公司名动态更新(保留版本号)
                                 String comp = BankUpdater.cachedCompany();
-                                if (comp != null && tvTitle != null
-                                        && !comp.equals(tvTitle.getText().toString())) {
-                                    tvTitle.setText("行藏有度-" + comp);
+                                if (comp != null && tvTitle != null) {
+                                    String want = appTitle() + "-" + comp;
+                                    if (!want.equals(tvTitle.getText().toString())) {
+                                        tvTitle.setText(want);
+                                    }
                                 }
                                 bRefreshPts.setEnabled(true);
                                 bRefreshPts.setText("刷新积分");
@@ -443,7 +456,40 @@ public class MainActivity extends Activity {
             }
         });
         rowExamBtn.addView(bPick);
+
+        Button bClean = mkBtn("清理未交卷");
+        bClean.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (!ensureLoginUi()) return;
+                bClean.setEnabled(false);
+                bClean.setText("清理中...");
+                final Button fb = bClean;
+                final android.content.Context app = getApplicationContext();
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        final BankUpdater.Result r = BankUpdater.cleanUnfinished(app);
+                        h.post(new Runnable() {
+                            @Override public void run() {
+                                fb.setEnabled(true);
+                                fb.setText("清理未交卷");
+                                Toast.makeText(MainActivity.this, r.message,
+                                        Toast.LENGTH_LONG).show();
+                                if (refreshPtsRef != null) refreshPtsRef.run();
+                            }
+                        });
+                    }
+                }).start();
+            }
+        });
+        rowExamBtn.addView(bClean);
         cardExam.addView(rowExamBtn);
+
+        // 答题状态: 紧跟按钮行, 点开始立即可见
+        tvExam = new TextView(this);
+        tvExam.setTextSize(13);
+        tvExam.setTextColor(0xFF555555);
+        tvExam.setPadding(0, (int) (6 * d), 0, (int) (2 * d));
+        cardExam.addView(tvExam);
 
         Switch swAutoExam = new Switch(this);
         swAutoExam.setTextSize(14);
@@ -455,12 +501,28 @@ public class MainActivity extends Activity {
             }
         });
         cardExam.addView(swAutoExam);
+    }
 
-        tvExam = new TextView(this);
-        tvExam.setTextSize(13);
-        tvExam.setTextColor(0xFF555555);
-        tvExam.setPadding(0, (int) (6 * d), 0, 0);
-        cardExam.addView(tvExam);
+    /** 标题文本: 行藏有度 (公司名由积分刷新动态追加) */
+    private String appTitle() {
+        return "行藏有度";
+    }
+
+    /** 本机版本号 */
+    private int appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** 运行状态卡显隐: 仅方式一(操作界面答题)显示 */
+    private void syncRunCardVisibility() {
+        if (cardRunView != null) {
+            boolean appMode = "app".equals(sp.getString("answer_mode", "http"));
+            cardRunView.setVisibility(appMode ? View.VISIBLE : View.GONE);
+        }
     }
 
     /** 切换答题方式后重建界面(显隐权限区块) */
@@ -469,24 +531,27 @@ public class MainActivity extends Activity {
         float d = getResources().getDisplayMetrics().density;
         if (modeBlock != null) buildModeBlock(modeBlock, d);
         if (httpBlock != null) buildHttpBlock(httpBlock, d);
+        syncRunCardVisibility();
+        loadBankInfo();
     }
 
     /** 刷新授权状态行: 到期时间 + 剩余天数, <=7天橙色提醒 */
     private void updateLicenseText() {
         if (tvLicense == null) return;
+        String ver = "v" + appVersion();
         String exp = License.expires(this);
         if (exp == null) {
-            tvLicense.setText("授权状态: ✗ 未激活");
+            tvLicense.setText(ver + " · 授权状态: ✗ 未激活");
             tvLicense.setTextColor(0xFFC62828);
             return;
         }
         String full = "20" + exp.substring(0, 2) + "-" + exp.substring(2, 4)
-                + "-" + exp.substring(4, 6) + " 23:59:59";
+                + "-" + exp.substring(4, 6);
         long remain = License.ymdPublic(exp) - System.currentTimeMillis();
         long days = remain / 86400000L;
-        String text = "授权至: " + full + " (剩余 " + days + " 天)";
+        String text = ver + " · 到期 " + full + " (剩" + days + "天)";
         if (days <= 7) {
-            text += " · 即将到期, 请续费";
+            text += " 即将到期";
             tvLicense.setTextColor(0xFFE65100);
         } else {
             tvLicense.setTextColor(0xFF1B8A3A);
@@ -560,6 +625,12 @@ public class MainActivity extends Activity {
             return;
         }
         buildMainUi();
+        // 延迟 2s 检查更新，避免 UI 未完全就绪时操作 dialog
+        new Handler(getMainLooper()).postDelayed(() -> checkUpdate(), 2000);
+        // 打开 APP 自动更新一次题库(已保存账号才触发; 延迟4s避让版本更新弹窗)
+        if (!sp.getString("idcard", "").isEmpty()) {
+            new Handler(getMainLooper()).postDelayed(this::triggerBankUpdate, 4000);
+        }
     }
 
     /** yyMMdd -> yyyy-MM-dd */
@@ -683,7 +754,7 @@ public class MainActivity extends Activity {
 
         // 标题 + 授权状态(公司名待个人信息拉取后动态替换)
         tvTitle = new TextView(this);
-        tvTitle.setText("行藏有度");
+        tvTitle.setText(appTitle());
         tvTitle.setTextSize(20);
         tvTitle.setTextColor(0xFF1A66C2);
         tvTitle.getPaint().setFakeBoldText(true);
@@ -748,14 +819,15 @@ public class MainActivity extends Activity {
         ll.addView(httpBlock);
         buildHttpBlock(httpBlock, d);
 
-        // 5. 实时进度(两方式共用)
+        // 5. 实时进度(仅方式一显示)
         LinearLayout cardRun = mkCard(ll, "运行状态");
+        cardRunView = cardRun;
         tvProgress = new TextView(this);
         tvProgress.setTextSize(14);
         tvProgress.setTextColor(0xFF222222);
         cardRun.addView(tvProgress);
 
-        // 6. 控制按钮
+        // 6. 控制按钮(仅方式一显示)
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -777,12 +849,6 @@ public class MainActivity extends Activity {
         });
         row.addView(bSubmit);
 
-        bUpdateCheck = mkBtn("检查更新");
-        bUpdateCheck.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { checkUpdate(); }
-        });
-        row.addView(bUpdateCheck);
-
         Button bReset = mkBtn("重置统计");
         bReset.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { BankService.resetStats(); }
@@ -798,6 +864,26 @@ public class MainActivity extends Activity {
         });
         row.addView(bUpd);
         cardRun.addView(row);
+
+        // 检查更新按钮(两方式共用, 始终显示)
+        LinearLayout rowUpd = new LinearLayout(this);
+        rowUpd.setOrientation(LinearLayout.HORIZONTAL);
+        bUpdateCheck = mkBtn("检查更新 v" + appVersion());
+        bUpdateCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { checkUpdate(); }
+        });
+        rowUpd.addView(bUpdateCheck);
+        ll.addView(rowUpd);
+        syncRunCardVisibility();
+
+        // 6.5 答题日志(实时错误/进度, 两方式共用)
+        LinearLayout cardLog = mkCard(ll, "答题日志");
+        tvLog = new TextView(this);
+        tvLog.setTextSize(12);
+        tvLog.setTextColor(0xFF333333);
+        tvLog.setLineSpacing(0, 1.25f);
+        tvLog.setText(BankUpdater.logText());
+        cardLog.addView(tvLog);
 
         // 7. 题库信息与说明
         tvInfo = new TextView(this);
@@ -821,6 +907,10 @@ public class MainActivity extends Activity {
             uiUpdating = true;
             try {
                 updateLicenseText();
+                if (tvLog != null) {
+                    String lt = BankUpdater.logText();
+                    if (!lt.equals(tvLog.getText().toString())) tvLog.setText(lt);
+                }
                 // 方式2可见时每30秒刷新一次积分概况
                 if (refreshPtsRef != null
                         && !"app".equals(sp.getString("answer_mode", "http"))
@@ -1027,7 +1117,8 @@ public class MainActivity extends Activity {
                                         sp.edit().remove("exam_paper_id")
                                                 .remove("exam_paper_name").apply();
                                         Toast.makeText(MainActivity.this,
-                                                "已清除指定试卷", Toast.LENGTH_SHORT).show();
+                                                "已清除指定试卷(将按张数自动)",
+                                                Toast.LENGTH_SHORT).show();
                                     } else {
                                         String row = list[which - 1];
                                         sp.edit()
@@ -1037,8 +1128,9 @@ public class MainActivity extends Activity {
                                                   row.substring(row.indexOf('|') + 1))
                                           .apply();
                                         Toast.makeText(MainActivity.this,
-                                                "已选择: " + items[which],
-                                                Toast.LENGTH_SHORT).show();
+                                                "已选择: " + items[which]
+                                                        + "\n点击「开始自动答题」立即开始",
+                                                Toast.LENGTH_LONG).show();
                                     }
                                 })
                                 .setNegativeButton("取消", null)
@@ -1129,6 +1221,8 @@ public class MainActivity extends Activity {
                 h.post(new Runnable() {
                     @Override public void run() {
                         Toast.makeText(MainActivity.this, r.message, Toast.LENGTH_LONG).show();
+                        // 答题完成: 实时刷新积分概况(含今日答卷统计)
+                        if (refreshPtsRef != null) refreshPtsRef.run();
                     }
                 });
             }
@@ -1142,7 +1236,7 @@ public class MainActivity extends Activity {
         UpdateHelper.checkLatest(this, new UpdateHelper.Callback() {
             @Override public void onResult(UpdateHelper.UpdateInfo info) {
                 bUpdateCheck.setEnabled(true);
-                bUpdateCheck.setText("检查更新");
+                bUpdateCheck.setText("检查更新 v" + appVersion());
                 if (info == null) {
                     Toast.makeText(MainActivity.this, "网络错误，无法获取更新信息",
                             Toast.LENGTH_SHORT).show();
@@ -1202,19 +1296,16 @@ public class MainActivity extends Activity {
         dlRow.addView(tvDownloadStatus);
         box.addView(dlRow);
 
-        bd.setMessage("更新说明:\n" + (info.changelog != null ? info.changelog : "无更新说明"));
         bd.setView(box);
 
         bd.setPositiveButton("立即下载", new android.content.DialogInterface.OnClickListener() {
             @Override public void onClick(android.content.DialogInterface dlg, int which) {
-                dlg.dismiss();
+                try { dlg.dismiss(); } catch (Exception ignore) { }
                 startDownload(info.downloadUrl);
             }
         });
         bd.setNegativeButton("稍后", null);
         dlDialog = bd.show();
-        // 去掉默认 setMessage 显示，我们自己控制
-        ((android.widget.TextView) dlDialog.findViewById(android.R.id.message)).setVisibility(View.GONE);
     }
 
     /** 下载 APK 并安装 */
@@ -1237,9 +1328,17 @@ public class MainActivity extends Activity {
                 if (tvDownloadStatus != null) {
                     tvDownloadStatus.setText("下载完成，正在安装...");
                 }
+                final File apk = new File(app.getExternalFilesDir(null), "AutoAnswer_update.apk");
                 try { dlDialog.dismiss(); } catch (Exception ignore) { }
-                File apk = new File(app.getExternalFilesDir(null), "AutoAnswer_update.apk");
-                UpdateHelper.installApk(app, apk);
+                // 延迟 500ms 确保 dialog 关闭后再触发安装
+                new Handler(getMainLooper()).postDelayed(() -> {
+                    if (apk.exists()) {
+                        UpdateHelper.installApk(app, apk);
+                    } else {
+                        Toast.makeText(MainActivity.this, "安装包文件不存在",
+                                Toast.LENGTH_LONG).show();
+                    }
+                }, 500);
             }
             @Override public void onFail(String msg) {
                 if (tvDownloadStatus != null) {
@@ -1264,12 +1363,24 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             sb.append("题库: 未加载\n");
         }
-        sb.append("\n使用步骤:\n")
-          .append("1. 开启无障碍服务(点上方按钮, 找到「行藏有度」开启)\n")
-          .append("2. 打开「彬煤安培365」APP, 手动登录\n")
-          .append("3. 进入考试页后自动答题、翻页, 答完自动交卷\n")
-          .append("4. 答题页底部有悬浮面板: 实时进度/暂停/交卷\n\n")
-          .append("规则: 快速模式每题约1秒, 慢速约3~6秒; 未命中题目随机作答; 交卷后静默8秒等待成绩, 不会重复答题");
+        boolean appMode = "app".equals(sp.getString("answer_mode", "http"));
+        if (appMode) {
+            sb.append("\n使用步骤(方式一):\n")
+              .append("1. 开启无障碍服务(点上方按钮, 找到「行藏有度」开启)\n")
+              .append("2. 打开「彬煤安培365」APP, 手动登录\n")
+              .append("3. 进入考试页后自动答题、翻页, 答完自动交卷\n")
+              .append("4. 答题页底部有悬浮面板: 实时进度/暂停/交卷\n\n")
+              .append("规则: 快速模式每题约1秒, 慢速约3~6秒; 未命中题目随机作答; 交卷后静默8秒等待成绩, 不会重复答题");
+        } else {
+            sb.append("\n使用步骤(方式二·协议答题):\n")
+              .append("1. 在「账号登录」输入账号密码, 点击「登 录」\n")
+              .append("2. 可先「题库更新」同步最新题库(推荐)\n")
+              .append("3. 点「选择试卷」指定试卷, 或设置答题张数(0=全部)\n")
+              .append("4. 点「开始自动答题」, 全程无需登录原APP\n")
+              .append("5. 有历史未交卷可点「清理未交卷」补交\n")
+              .append("6. 「一键日常」自动完成签到+随机练习+阅读15篇\n\n")
+              .append("规则: 每题按答题延迟间隔提交; 交卷得分自动计入积分概况; 答卷积分以平台实时明细为准");
+        }
         tvInfo.setText(sb.toString());
     }
 

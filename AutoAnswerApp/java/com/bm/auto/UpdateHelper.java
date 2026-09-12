@@ -64,7 +64,7 @@ public final class UpdateHelper {
             try {
                 JSONObject latest = fetchJson("https://api.github.com/repos/"
                         + GH_REPO + "/releases/latest", true);
-                if (latest == null) { cb.onResult(null); return; }
+                if (latest == null) { postMain(act, () -> cb.onResult(null)); return; }
                 String tagName = latest.optString("tag_name", "");
                 int remoteVc = 0;
                 try { remoteVc = Integer.parseInt(tagName.replaceFirst("^v", "")); } catch (Exception ignore) {}
@@ -82,12 +82,18 @@ public final class UpdateHelper {
                     }
                 }
                 int localVc = getLocalVersionCode(act.getApplicationContext());
-                cb.onResult(new UpdateInfo(remoteVc, verName, size, dlUrl, body,
-                        remoteVc > localVc));
+                final UpdateInfo info = new UpdateInfo(remoteVc, verName, size, dlUrl, body,
+                        remoteVc > localVc);
+                postMain(act, () -> cb.onResult(info));
             } catch (Exception e) {
-                cb.onResult(null);
+                postMain(act, () -> cb.onResult(null));
             }
         }).start();
+    }
+
+    /** 在主线程执行 runnable */
+    private static void postMain(Activity act, Runnable r) {
+        new Handler(act.getMainLooper()).post(r);
     }
 
     /** 下载 APK 到外部存储并返回 file (调用方负责安装) */

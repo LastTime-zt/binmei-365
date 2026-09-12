@@ -66,6 +66,22 @@ public class BankService extends AccessibilityService {
         qNum = 0; answered = 0; hits = 0; status = "待机";
     }
 
+    /** 悬浮窗"初始化": 清空答题统计/冷却/暂停态, 回到初始待机(不影响无障碍服务本身) */
+    public static void initReset() {
+        qNum = 0; answered = 0; hits = 0;
+        paused = false; forceSubmit = false;
+        sCooldown = 0;
+        status = "待机(已初始化)";
+        BankService inst = self;
+        if (inst != null) {
+            inst.sameCount = 0;
+            inst.lastStem = "";
+            inst.h.removeCallbacks(inst.tick);
+            inst.h.postDelayed(inst.tick, 500);
+            inst.refreshPanel();
+        }
+    }
+
     private SQLiteDatabase bank;
     /** 内存题库索引: 精确题干 / 去标点题干 -> 答案记录, 兜住屏幕文本标点差异 */
     private final java.util.Map<String, String[]> memExact = new java.util.HashMap<>();
@@ -509,6 +525,12 @@ public class BankService extends AccessibilityService {
                 @Override public void onClick(View v) { forceSubmit = true; }
             });
             row.addView(bSub);
+
+            Button bInit = mkBtn("初始化", (int) (46 * d));
+            bInit.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { initReset(); }
+            });
+            row.addView(bInit);
 
             Button bHide = mkBtn("隐藏", (int) (46 * d));
             bHide.setOnClickListener(new View.OnClickListener() {

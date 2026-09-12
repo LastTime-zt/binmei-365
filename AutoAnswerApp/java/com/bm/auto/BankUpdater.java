@@ -1,7 +1,10 @@
 package com.bm.auto;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -32,6 +35,59 @@ import java.util.regex.Pattern;
 public class BankUpdater {
 
     private static final String TAG = "BankUpdater";
+
+    /** 应用上下文(答题时题库兜底查询用), 由入口方法设置 */
+    private static volatile android.content.Context sCtx;
+
+    // ---- 答题日志(界面底部显示, 最近 30 条) ----
+    private static final java.util.List<String> examLog =
+            java.util.Collections.synchronizedList(new ArrayList<String>());
+    private static final java.util.List<String> lastScores =
+            java.util.Collections.synchronizedList(new ArrayList<String>());
+
+    /** 追加一条日志(带时间), 超过30条移除最旧 */
+    public static void appendLog(String msg) {
+        String t = new java.text.SimpleDateFormat("HH:mm:ss",
+                java.util.Locale.US).format(new java.util.Date());
+        synchronized (examLog) {
+            examLog.add(t + " " + msg);
+            while (examLog.size() > 30) examLog.remove(0);
+        }
+    }
+
+    /** 当前日志快照(倒序, 最新在上) */
+    public static String logText() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (examLog) {
+            for (int i = examLog.size() - 1; i >= 0; i--) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(examLog.get(i));
+            }
+        }
+        return sb.length() == 0 ? "(暂无日志)" : sb.toString();
+    }
+
+    /** 最近答卷成绩快照("试卷名 分数"列表, 倒序) */
+    public static String lastScoresText() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (lastScores) {
+            for (int i = lastScores.size() - 1; i >= 0; i--) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(lastScores.get(i));
+            }
+        }
+        return sb.length() == 0 ? "(暂无)" : sb.toString();
+    }
+
+    private static void recordScore(String paperName, String score) {
+        String t = new java.text.SimpleDateFormat("HH:mm",
+                java.util.Locale.US).format(new java.util.Date());
+        synchronized (lastScores) {
+            lastScores.add(t + "  " + paperName + "  得分: " + score);
+            while (lastScores.size() > 5) lastScores.remove(0);
+        }
+    }
+
     static final String BASE = "http://61.185.41.209:8888";
     // 试卷类别Id(平台固定分类, 与账号无关)
     private static final String ETYPE = "29827a37-50af-4e6d-b25b-e79d356b4ed7";
@@ -156,8 +212,10 @@ public class BankUpdater {
     public static Result dailyTasks(Context ctx) {
         if (dailyRunning) return new Result(false, 0, "日常任务已在进行中");
         dailyRunning = true;
+        acquireWakeLock(ctx);
         StringBuilder log = new StringBuilder();
         try {
+            appendLog("一键日常开始执行");
             // 0. 查今日积分明细, 已完成的部分智能跳过
             dailyInfo = "查询今日完成情况...";
             JSONObject done = todayPoints(ctx);
@@ -166,6 +224,7 @@ public class BankUpdater {
             boolean signed = done.optInt("签到", 0) > 0;
             Log.i(TAG, "今日已完成: 练习" + pPractice + " 阅读" + pStudy
                     + " 签到" + signed);
+            appendLog("今日进度: 练习" + pPractice + "/15  阅读" + pStudy + "/15  签到" + (signed ? "✓" : "✗"));
 
             // 1. 随机练习(服务端要求: 练1题后才能签到; 记录上限15条/日, 计分上限10/日)
             int nPractice = pPractice >= 15 ? 0 : Math.min(10, 15 - pPractice);
@@ -173,10 +232,13 @@ public class BankUpdater {
             if (nPractice <= 0) {
                 r1 = new Result(true, 0, "今日已满, 跳过");
                 Log.i(TAG, "随机练习 -> 跳过(已有" + pPractice + "条)");
+                appendLog("随机练习: 已满跳过");
             } else {
                 dailyInfo = "随机练习中...";
+                appendLog("随机练习中(" + nPractice + "题)...");
                 r1 = practice(ctx, nPractice, true);
                 Log.i(TAG, "随机练习 -> " + r1.message);
+                appendLog("随机练习: " + r1.message);
             }
             log.append("随机练习: ").append(r1.message).append("\n");
 
@@ -185,10 +247,13 @@ public class BankUpdater {
             if (signed) {
                 r2 = new Result(true, 1, "今日已签, 跳过");
                 Log.i(TAG, "签到 -> 跳过(已签)");
+                appendLog("签到: 已签跳过");
             } else {
                 dailyInfo = "正在签到...";
+                appendLog("签到中...");
                 r2 = checkin(ctx);
                 Log.i(TAG, "签到 -> " + r2.message);
+                appendLog("签到: " + r2.message);
             }
             log.append("签到: ").append(r2.message).append("\n");
 
@@ -198,18 +263,25 @@ public class BankUpdater {
             if (nStudy <= 0) {
                 r3 = new Result(true, 0, "今日已满15篇, 跳过");
                 Log.i(TAG, "阅读 -> 跳过(已有" + pStudy + "分)");
+                appendLog("阅读: 已满跳过");
             } else {
                 dailyInfo = "阅读浏览中...(还差" + nStudy + "篇)";
+                appendLog("阅读浏览中(" + nStudy + "篇, 约" + (nStudy * 65 / 60) + "分钟)...");
                 r3 = study(ctx, nStudy);
                 Log.i(TAG, "阅读 -> " + r3.message);
+                appendLog("阅读: " + r3.message);
             }
             log.append("阅读: ").append(r3.message);
 
+            appendLog("一键日常完成: 练习" + r1.count + "题  阅读" + r3.count + "篇");
             return new Result(true, r1.count + r3.count, log.toString().trim());
         } catch (Exception e) {
             Log.e(TAG, "日常任务失败", e);
+            appendLog("日常任务失败: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " " + e.getMessage() : ""));
             return new Result(false, 0, "日常任务失败: " + log + e.getClass().getSimpleName());
         } finally {
+            releaseWakeLock();
             dailyRunning = false;
         }
     }
@@ -425,15 +497,7 @@ public class BankUpdater {
         SQLiteDatabase db = null;
         try {
             // 首次运行库文件可能尚未由服务复制, 这里兜底从 assets 拷贝
-            if (!f.exists() || f.length() == 0) {
-                java.io.InputStream is = ctx.getAssets().open("question_bank.db");
-                java.io.FileOutputStream os = new java.io.FileOutputStream(f);
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
-                os.close();
-                is.close();
-            }
+            ensureBankFile(ctx);
             // cookie jar: 登录态 + POST 后服务器下发的练习会话(lxpid/lxId/...), 必须回传
             Map<String, String> jar = new HashMap<>();
             ensureLogin(ctx, jar);
@@ -632,6 +696,25 @@ public class BankUpdater {
     public static volatile String examAnswer = "";
     /** 每题作答延迟(毫秒), 界面"答题延迟(秒/题)"设置, 默认1秒 */
     public static volatile int answerDelayMs = 1000;
+    /** 保持 CPU 唤醒, 防止锁屏/后台时答题中断 (PARTIAL_WAKE_LOCK, 限时30min) */
+    private static volatile PowerManager.WakeLock sWakeLock;
+
+    /** 持有 WakeLock, 防止锁屏/后台时 CPU 休眠导致请求超时; 最多持有时长 30min */
+    private static void acquireWakeLock(Context ctx) {
+        if (sWakeLock != null) return;
+        PowerManager pm = (PowerManager) ctx.getApplicationContext()
+                .getSystemService(Context.POWER_SERVICE);
+        sWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BankUpdater:Exam");
+        sWakeLock.acquire(30 * 60 * 1000L);
+    }
+
+    /** 释放 WakeLock */
+    private static void releaseWakeLock() {
+        if (sWakeLock != null) {
+            try { sWakeLock.release(); } catch (Exception ignore) { }
+            sWakeLock = null;
+        }
+    }
 
     /** 个人信息: MyBaseInfo 页 vData 解析结果 */
     public static class PersonInfo {
@@ -776,10 +859,18 @@ public class BankUpdater {
     public static Result runExams(Context ctx, int limit, String paperId) {
         if (examRunning) return new Result(false, 0, "答题已在进行中");
         examRunning = true;
-        examInfo = "";
-        examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
+        acquireWakeLock(ctx);
+        sCtx = ctx.getApplicationContext();
+        String desc = paperId != null
+                ? "指定试卷模式"
+                : "全部试卷模式";
+        examInfo = desc;
+        SharedPreferences sp = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE);
+        examPaper = paperId != null ? sp.getString("exam_paper_name", "") : "";
+        examQNum = 0; examQTotal = 0; examAnswer = "";
         answerDelayMs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
                 .getInt("answer_delay", 1) * 1000;
+        Result ret = null;
         try {
             Map<String, String> jar = new HashMap<>();
             ensureLogin(ctx, jar);
@@ -801,10 +892,15 @@ public class BankUpdater {
                     examPaper = uname;
                     String score = doPaper(jar, pid, u.optString("PaperId", ""), ksmxid);
                     Log.i(TAG, "未交卷[" + ksmxid + "] -> " + score);
+                    appendLog("补交未交卷: " + uname);
                     if (score != null) {
                         done++;
                         if (scores.length() > 0) scores.append("/");
                         scores.append(score);
+                        addExamStat(ctx, score);
+                        recordScore(uname, score);
+                    } else {
+                        appendLog("补交失败: " + uname);
                     }
                     Thread.sleep(3000);
                 }
@@ -812,55 +908,69 @@ public class BankUpdater {
 
             if (paperId != null && !paperId.isEmpty()) {
                 // 用户指定了试卷: 只考这张
+                appendLog("指定试卷开始答题: " + examPaper);
                 String score = doPaper(jar, pid, paperId, null);
                 if (score != null) {
                     done++;
                     if (scores.length() > 0) scores.append("/");
                     scores.append(score);
+                    addExamStat(ctx, score);
+                    recordScore("指定试卷", score);
+                } else {
+                    appendLog("指定试卷交卷失败: " + paperId);
                 }
-                return new Result(true, done,
+                ret = new Result(true, done,
                         done > 0 ? "完成 " + done + " 张, 得分: " + scores
                                 : "该试卷交卷失败");
-            }
-
-            // 1. 可考试卷列表(按账号分配的所有类别)
-            examInfo = "获取试卷列表...";
-            JSONArray papers = listPapers(jar, pid);
-            Log.i(TAG, "可考试卷 " + (papers == null ? 0 : papers.length())
-                    + " 张, limit=" + limit);
-            if (papers == null || papers.length() == 0) {
-                return new Result(true, done,
-                        done > 0 ? "完成未交卷 " + done + " 张, 得分: " + scores
-                                : "没有可考试的试卷");
-            }
-            int total = (limit > 0) ? Math.min(limit, papers.length())
-                    : papers.length();
-
-            for (int i = 0; i < total; i++) {
-                JSONObject p = papers.getJSONObject(i);
-                String pid2 = p.getString("PaperId");
-                String paperName = p.optString("PaperName", "");
-                examInfo = "答题 " + (i + 1) + "/" + total + ": "
-                        + paperName.substring(0, Math.min(14, paperName.length())) + "...";
-                examPaper = paperName;
-                String score = doPaper(jar, pid, pid2, null);
-                if (score != null) {
-                    done++;
-                    if (scores.length() > 0) scores.append("/");
-                    scores.append(score);
+            } else {
+                // 1. 可考试卷列表(按账号分配的所有类别)
+                examInfo = "获取试卷列表...";
+                JSONArray papers = listPapers(jar, pid);
+                Log.i(TAG, "可考试卷 " + (papers == null ? 0 : papers.length())
+                        + " 张, limit=" + limit);
+                if (papers == null || papers.length() == 0) {
+                    ret = new Result(true, done,
+                            done > 0 ? "完成未交卷 " + done + " 张, 得分: " + scores
+                                    : "没有可考试的试卷");
+                } else {
+                    int total = (limit > 0) ? Math.min(limit, papers.length())
+                            : papers.length();
+                    for (int i = 0; i < total; i++) {
+                        JSONObject p = papers.getJSONObject(i);
+                        String pid2 = p.getString("PaperId");
+                        String paperName = p.optString("PaperName", "");
+                        examInfo = "答题 " + (i + 1) + "/" + total + ": "
+                                + paperName.substring(0, Math.min(14, paperName.length())) + "...";
+                        examPaper = paperName;
+                        appendLog("开始答题 " + (i + 1) + "/" + total + ": " + paperName);
+                        String score = doPaper(jar, pid, pid2, null);
+                        if (score != null) {
+                            done++;
+                            if (scores.length() > 0) scores.append("/");
+                            scores.append(score);
+                            addExamStat(ctx, score);
+                            recordScore(paperName, score);
+                        }
+                        Thread.sleep(3000);
+                    }
+                    ret = new Result(true, done,
+                            done > 0 ? "完成 " + done + " 张, 得分: " + scores
+                                    : "没有成功交卷的试卷");
                 }
-                Thread.sleep(3000);
             }
-            return new Result(true, done,
-                    done > 0 ? "完成 " + done + " 张, 得分: " + scores
-                            : "没有成功交卷的试卷");
         } catch (Exception e) {
             Log.e(TAG, "自动答题失败", e);
-            return new Result(false, 0, "答题失败: " + e.getClass().getSimpleName()
+            appendLog("答题失败: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " " + e.getMessage() : ""));
+            ret = new Result(false, 0, "答题失败: " + e.getClass().getSimpleName()
                     + (e.getMessage() != null ? " " + e.getMessage() : ""));
         } finally {
+            releaseWakeLock();
             examRunning = false;
+            examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
         }
+        examInfo = "已结束 · " + ret.message;
+        return ret;
     }
 
     /** 未交卷考试列表(GetMyNotExamListOne type=3) */
@@ -876,6 +986,143 @@ public class BankUpdater {
             Log.w(TAG, "拉取未完成考试失败", e);
             return null;
         }
+    }
+
+    /** 查询未交卷考试数量(不清卷, 仅供界面提示) */
+    public static int countUnfinished(Context ctx) {
+        try {
+            Map<String, String> jar = new HashMap<>();
+            ensureLogin(ctx, jar);
+            String pid = jar.get("xxpid");
+            if (pid == null || pid.isEmpty()) return -1;
+            JSONArray un = listUnfinished(jar, pid);
+            return un == null ? -1 : un.length();
+        } catch (Exception e) {
+            Log.w(TAG, "查询未交卷数量失败", e);
+            return -1;
+        }
+    }
+
+    /** 独立清理未完成考试: 有未交卷的直接逐张答题交卷清除, 不开新卷 */
+    public static Result cleanUnfinished(Context ctx) {
+        if (examRunning) return new Result(false, 0, "答题已在进行中");
+        examRunning = true;
+        acquireWakeLock(ctx);
+        sCtx = ctx.getApplicationContext();
+        examInfo = "";
+        Result ret = null;
+        try {
+            Map<String, String> jar = new HashMap<>();
+            ensureLogin(ctx, jar);
+            String pid = jar.get("xxpid");
+            if (pid == null || pid.isEmpty()) throw new RuntimeException("未取得 pid");
+            examInfo = "检查未完成考试...";
+            appendLog("开始检查未交卷考试...");
+            JSONArray un = listUnfinished(jar, pid);
+            if (un == null || un.length() == 0) {
+                appendLog("没有未交卷考试");
+                ret = new Result(true, 0, "没有未完成的考试");
+            } else {
+                appendLog("发现 " + un.length() + " 张未交卷考试, 开始清理");
+                int done = 0;
+                StringBuilder scores = new StringBuilder();
+                for (int i = 0; i < un.length(); i++) {
+                    JSONObject u = un.getJSONObject(i);
+                    String ksmxid = u.getString("ExamDetailId");
+                    String uname = u.optString("ExamName", "未完成考试");
+                    examInfo = "清理未交卷 " + (i + 1) + "/" + un.length()
+                            + ": " + uname.substring(0, Math.min(12, uname.length())) + "...";
+                    examPaper = uname;
+                    appendLog("清理 " + (i + 1) + "/" + un.length() + ": " + uname);
+                    String score = doPaper(jar, pid, u.optString("PaperId", ""), ksmxid);
+                    Log.i(TAG, "清理未交卷[" + ksmxid + "] -> " + score);
+                    if (score != null) {
+                        done++;
+                        if (scores.length() > 0) scores.append("/");
+                        scores.append(score);
+                        addExamStat(ctx, score);
+                        recordScore(uname, score);
+                    } else {
+                        appendLog("答卷失败: " + uname);
+                    }
+                    Thread.sleep(3000);
+                }
+                // 清理后再确认是否还有残留
+                JSONArray rest = listUnfinished(jar, pid);
+                int restN = rest == null ? 0 : rest.length();
+                ret = new Result(true, done,
+                        "清理完成 " + done + " 张, 得分: " + scores
+                                + (restN > 0 ? " (仍剩 " + restN + " 张未清完)" : ""));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "清理未完成考试失败", e);
+            appendLog("清理失败: " + e.getClass().getSimpleName());
+            ret = new Result(false, 0, "清理失败: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " " + e.getMessage() : ""));
+        } finally {
+            releaseWakeLock();
+            examRunning = false;
+            examPaper = ""; examQNum = 0; examQTotal = 0; examAnswer = "";
+        }
+        examInfo = "已结束 · " + ret.message;
+        return ret;
+    }
+
+    // ---- 答卷统计(今日答卷张数/得分, 供积分概况显示) ----
+
+    /** 累计今日答卷统计: score 形如 "98" 或 "98/100" */
+    private static void addExamStat(Context ctx, String score) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(\\d+)").matcher(score == null ? "" : score);
+            int pts = m.find() ? Integer.parseInt(m.group(1)) : 0;
+            android.content.SharedPreferences sp =
+                    ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE);
+            String today = new java.text.SimpleDateFormat("yyyy-MM-dd",
+                    java.util.Locale.US).format(new java.util.Date());
+            if (!today.equals(sp.getString("exam_stat_date", ""))) {
+                sp.edit().putString("exam_stat_date", today)
+                        .putInt("exam_stat_count", 0)
+                        .putInt("exam_stat_pts", 0).apply();
+            }
+            sp.edit()
+              .putInt("exam_stat_count", sp.getInt("exam_stat_count", 0) + 1)
+              .putInt("exam_stat_pts", sp.getInt("exam_stat_pts", 0) + pts)
+              .apply();
+        } catch (Exception e) {
+            Log.w(TAG, "答卷统计失败", e);
+        }
+    }
+
+    /** 今日答卷统计(实时积分明细): [0]=答卷次数(模拟考试条数) [1]=获得积分合计 */
+    public static int[] examStatToday(Context ctx) {
+        int[] out = new int[]{0, 0};
+        try {
+            Map<String, String> jar = new HashMap<>();
+            ensureLogin(ctx, jar);
+            String pid = jar.get("xxpid");
+            if (pid == null || pid.isEmpty()) return out;
+            String rep = http(jar,
+                    "/ArchiveManger/D_PersonAccumulate/GetMyAllAccumulateListOne?pid="
+                            + URLEncoder.encode(esdt(pid), "UTF-8")
+                            + "&page=1&rows=200",
+                    null, BASE + "/PersonWap/Index0018?wx=", "GET");
+            org.json.JSONArray arr = new JSONObject(rep).optJSONArray("data");
+            if (arr == null) return out;
+            String today = new java.text.SimpleDateFormat("yyyy-MM-dd",
+                    java.util.Locale.US).format(new java.util.Date());
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject it = arr.optJSONObject(i);
+                if (it == null) continue;
+                if (!"模拟考试".equals(it.optString("AccumulateName", ""))) continue;
+                if (!it.optString("CreateDate", "").startsWith(today)) continue;
+                out[0]++;
+                out[1] += it.optInt("Accumulate", 0);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "查询今日答卷统计失败", e);
+        }
+        return out;
     }
 
     /**
@@ -958,7 +1205,7 @@ public class BankUpdater {
         Map<String, String> form = new HashMap<>();
         form.put("ksmxid", esdt(ksmxid));
         form.put("showBZDA", esdt("0"));
-        form.put("style", esdt("1"));
+        form.put("style", esdt("0"));
         form.put("vErr", esdt("-1"));
         form.put("nc", esdt(""));
         form.put("r", esdt(""));
@@ -985,18 +1232,81 @@ public class BankUpdater {
         examQNum = 0;
         examAnswer = "";
         StringBuilder answer = new StringBuilder();
+        android.content.Context appCtx = sCtx;
+        int libHit = 0, libMiss = 0, srvAns = 0;
         for (String q : qs) {
-            String[] f = q.split(",");
-            f[4] = f[13];   // 我的答案 <- 标准答案
-            // 实时状态: 题号 + 标准答案文本
-            examQNum++;
-            examAnswer = ansText(f[13], f[16]);
-            for (int i = 0; i < 15; i++) {
-                if (i > 0) answer.append(',');
-                answer.append(f[i]);
+            try {
+                String[] f = q.split(",");
+                int n = f.length;
+                if (n < 15) {
+                    Log.w(TAG, "字段异常(" + n + "): " + q.substring(0, Math.min(40, q.length())));
+                }
+                // 三种尾部布局按内容自动识别(分值=单选1/判断3):
+                //  A. [n-4]=答案 [n-3]=分值 [n-2]=题干 [n-1]=选项
+                //  B. [n-3]=题干 [n-2]=分值 [n-1]=选项          (无答案字段)
+                //  C. [n-4]=题干 [n-3]=答案 [n-2]=分值 [n-1]=选项
+                String curOpts = urlDecode(f[n - 1]);
+                String std;
+                String stem;
+                boolean judge;
+                if (!f[n - 2].matches("\\d{1,2}")) {
+                    // 布局A: n-2 是题干
+                    std = f[n - 4];
+                    judge = "3".equals(f[n - 3]);
+                    stem = urlDecode(f[n - 2]);
+                } else if (f[n - 3].matches("[A-DYN]")) {
+                    // 布局C: n-3 是答案
+                    std = f[n - 3];
+                    judge = "3".equals(f[n - 2]);
+                    stem = urlDecode(f[n - 4]);
+                } else {
+                    // 布局B: 无答案字段
+                    std = "-1";
+                    judge = "3".equals(f[n - 2]);
+                    stem = urlDecode(f[n - 3]);
+                }
+                // 答案字段必须是合法字母, 否则视为未给答案
+                if (!(std.matches("[A-D]") || std.matches("[YN]"))) {
+                    std = "-1";
+                }
+                if ("-1".equals(std)) {
+                    // 服务器未给标准答案 -> 本地题库兜底(选项顺序随机, 须按文本映射字母)
+                    String[] lib = bankLookup(appCtx, stem);   // [0]=qtype [1]=options [2]=answer
+                    if (lib != null) {
+                        libHit++;
+                        std = mapAnswerByText(lib, curOpts);
+                    } else {
+                        libMiss++;
+                        std = judge ? "Y" : "A";  // 判断题默认对, 单选默认A
+                        appendLog("第" + (examQNum + 1) + "题题库未命中, 默认答 "
+                                + std + " (题干: "
+                                + stem.substring(0, Math.min(24, stem.length())) + "...)");
+                    }
+                } else {
+                    srvAns++;
+                }
+                f[4] = std;   // 我的答案 <- 标准答案
+                // 实时状态: 题号 + 标准答案文本
+                examQNum++;
+                examAnswer = ansText(std, f[n - 1]);
+                for (int i = 0; i < 15; i++) {
+                    if (i > 0) answer.append(',');
+                    answer.append(f[i]);
+                }
+                answer.append('|');
+                Thread.sleep(answerDelayMs + (long) (Math.random() * 300));
+            } catch (InterruptedException ie) {
+                throw ie;
+            } catch (Exception qe) {
+                Log.e(TAG, "第" + (examQNum + 1) + "题解析失败: " + qe, qe);
+                // 兜底: 原样追加, 保证总字段数不变
+                if (answer.length() > 0 && answer.charAt(answer.length() - 1) != '|') {
+                    answer.append('|');
+                }
+                answer.append(q).append('|');
+                examQNum++;
+                examAnswer = "(解析失败)";
             }
-            answer.append('|');
-            Thread.sleep(answerDelayMs + (long) (Math.random() * 300));
         }
 
         // 3. 提交答案
@@ -1011,9 +1321,15 @@ public class BankUpdater {
         form.put("ksmxid", ksmxid);
         http(jar, "/Home/ExamClockOne", encodeForm(form),
                 BASE + "/P_ExamDetail/OnlineTestOne", "POST");
-        String score = http(jar, "/Home/EndTimeOne", encodeForm(form),
+        String raw = http(jar, "/Home/EndTimeOne", encodeForm(form),
                 BASE + "/P_ExamDetail/OnlineTestOne", "POST").trim();
+        // 响应可能为 "100" 或 "您的分数为：50,不合格！|50|不合格！", 解析出纯数字得分
+        java.util.regex.Matcher sm = java.util.regex.Pattern
+                .compile("\\d+").matcher(raw);
+        String score = sm.find() ? sm.group() : raw;
         Log.i(TAG, "交卷 " + paperId + " -> " + score);
+        appendLog("交卷完成, 得分: " + score
+                + " (题库命中" + libHit + "/未命中" + libMiss + "/服务器给答" + srvAns + ")");
         examPaper = "";
         examQNum = 0; examQTotal = 0; examAnswer = "";
         return score;
@@ -1040,6 +1356,143 @@ public class BankUpdater {
             return sb.toString();
         } catch (Exception e) {
             return ans;
+        }
+    }
+
+    /** URL 解码(容错) */
+    private static String urlDecode(String s) {
+        try {
+            return java.net.URLDecoder.decode(s == null ? "" : s, "UTF-8");
+        } catch (Exception e) {
+            return s == null ? "" : s;
+        }
+    }
+
+    /** 确保 filesDir/bank.db 存在: 缺失时从 assets 拷贝 */
+    private static void ensureBankFile(Context ctx) {
+        File f = new File(ctx.getFilesDir(), "bank.db");
+        if (f.exists() && f.length() > 0) return;
+        java.io.InputStream is = null;
+        java.io.FileOutputStream os = null;
+        try {
+            is = ctx.getAssets().open("question_bank.db");
+            os = new java.io.FileOutputStream(f);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+            Log.i(TAG, "bank.db 缺失, 已从 assets 恢复");
+        } catch (Exception e) {
+            Log.w(TAG, "assets 题库恢复失败", e);
+        } finally {
+            try { if (is != null) is.close(); } catch (Exception ignore) { }
+            try { if (os != null) os.close(); } catch (Exception ignore) { }
+        }
+    }
+
+    /** 本地题库查询: 题干精确 -> 归一化 -> 前缀, 返回 [qtype, options, answer] 或 null */
+    private static String[] bankLookup(Context ctx, String stem) {
+        if (ctx == null || stem == null || stem.isEmpty()) return null;
+        SQLiteDatabase db = null;
+        try {
+            ensureBankFile(ctx);
+            db = SQLiteDatabase.openDatabase(
+                    new File(ctx.getFilesDir(), "bank.db").getPath(),
+                    null, SQLiteDatabase.OPEN_READONLY);
+            // 与入库侧 clean() 一致: 先解码 HTML 实体再去空白, 否则带 &nbsp; 的题干查不到
+            String clean = stem.replace("&nbsp;", " ").replace("&amp;", "&")
+                    .replace("&lt;", "<").replace("&gt;", ">")
+                    .replace("&quot;", "\"").replace("&#39;", "'")
+                    .replaceAll("[\\s\\u00a0\\u3000]+", "");
+            String norm = clean.replaceAll(
+                    "[\\p{Punct}\\u3000-\\u303F\\uFF00-\\uFFEF]", "").toLowerCase();
+            // 1. 精确
+            String[] r = bankQuery(db, "question=?", new String[]{clean});
+            if (r != null) return r;
+            // 2. 前缀(去编号)
+            String noNum = clean.replaceFirst("^\\d+[.、．]?", "");
+            if (noNum.length() >= 12) {
+                r = bankQuery(db, "question LIKE ?",
+                        new String[]{noNum.substring(0, 12) + "%"});
+                if (r != null) return r;
+            }
+            // 3. 归一化扫描(题目量有限, 全表可接受)
+            if (norm.length() >= 10) {
+                Cursor c = null;
+                try {
+                    c = db.query("bank", new String[]{"question", "qtype", "options", "answer"},
+                            null, null, null, null, null);
+                    while (c.moveToNext()) {
+                        String q = c.getString(0) == null ? "" : c.getString(0);
+                        String qn = q.replaceAll(
+                                "[\\p{Punct}\\u3000-\\u303F\\uFF00-\\uFFEF]", "")
+                                .toLowerCase();
+                        if (qn.equals(norm) || (qn.length() > 14
+                                && norm.startsWith(qn.substring(0, 14)))) {
+                            return new String[]{c.getString(1), c.getString(2),
+                                    c.getString(3)};
+                        }
+                    }
+                } finally {
+                    if (c != null) c.close();
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            Log.w(TAG, "题库查询失败", e);
+            return null;
+        } finally {
+            if (db != null) db.close();
+        }
+    }
+
+    private static String[] bankQuery(SQLiteDatabase db, String where, String[] args) {
+        Cursor c = null;
+        try {
+            c = db.query("bank", new String[]{"qtype", "options", "answer"},
+                    where, args, null, null, null);
+            return c.moveToFirst()
+                    ? new String[]{c.getString(0), c.getString(1), c.getString(2)}
+                    : null;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    /**
+     * 选项顺序随机化处理: 题库答案字母对应的选项文本 -> 当前试卷中同文本的字母。
+     * lib: [0]=qtype [1]=optionsJson [2]=answer; curOpts: "A.xxx#B.xxx#..."
+     */
+    private static String mapAnswerByText(String[] lib, String curOpts) {
+        try {
+            String ans = lib[2] == null ? "" : lib[2].trim().toUpperCase();
+            if (ans.isEmpty()) return "A";
+            // 判断题: Y/N 无顺序问题, 直接返回
+            if ("Y".equals(ans) || "N".equals(ans)) return ans;
+            // 题库答案文本(入库时已解码实体, 只需去空白)
+            String bankTxt = "";
+            try {
+                org.json.JSONObject o = new org.json.JSONObject(lib[1]);
+                bankTxt = o.optString(ans, "").replaceAll("[\\s\\u00A0\\u3000]+", "");
+            } catch (Exception ignore) { }
+            if (bankTxt.isEmpty()) return ans;
+            // 在当前试卷选项中按文本查找(先解码实体, 与题库文本口径一致)
+            for (String part : curOpts.split("#")) {
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("^([A-Z])[.、．:：]?(.*)$")
+                        .matcher(part.trim());
+                if (m.find()) {
+                    String cur = m.group(2).replace("&nbsp;", " ").replace("&amp;", "&")
+                            .replace("&lt;", "<").replace("&gt;", ">")
+                            .replace("&quot;", "\"").replace("&#39;", "'")
+                            .replaceAll("[\\s\\u00A0\\u3000]+", "");
+                    if (cur.equals(bankTxt)) return m.group(1);
+                }
+            }
+            return ans;   // 文本未匹配到(选项内容有差异), 退回字母
+        } catch (Exception e) {
+            return "A";
         }
     }
 }
