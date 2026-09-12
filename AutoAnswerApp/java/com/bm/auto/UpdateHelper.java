@@ -16,7 +16,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.URL;
+import java.util.Base64;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -31,6 +34,16 @@ public final class UpdateHelper {
     private static final String GH_REPO = "LastTime-zt/binmei-365";
     private static final String GH_TOKEN =
             "YOUR_GH_TOKEN_HERE";
+
+    // 本地代理列表(按优先级尝试), 带账号密码的会先试无认证的, 失败再试认证的
+    private static final String PROXY_HOST1 = "192.168.1.7";
+    private static final int    PROXY_PORT1 = 7890;
+    private static final String PROXY_HOST2 = "a.rr2.kdns.fr";
+    private static final int    PROXY_PORT2 = 10800;
+    private static final String PROXY_USER2 = "12349876";
+    private static final String PROXY_PASS2 = "12349876";
+    private static final String PROXY_AUTH2 = Base64.getEncoder()
+            .encodeToString((PROXY_USER2 + ":" + PROXY_PASS2).getBytes());
 
     /** 回调 */
     public interface Callback {
@@ -67,7 +80,10 @@ public final class UpdateHelper {
                 if (latest == null) { postMain(act, () -> cb.onResult(null)); return; }
                 String tagName = latest.optString("tag_name", "");
                 int remoteVc = 0;
-                try { remoteVc = Integer.parseInt(tagName.replaceFirst("^v", "")); } catch (Exception ignore) {}
+                try {
+                    String num = tagName.replaceFirst("^v", "").replaceAll("[^0-9]", "");
+                    remoteVc = Integer.parseInt(num);
+                } catch (Exception ignore) {}
                 String verName = latest.optString("name", "");
                 String body = latest.optString("body", "");
                 JSONArray assets = latest.optJSONArray("assets");
@@ -100,12 +116,19 @@ public final class UpdateHelper {
     public static File downloadApk(Context ctx, String url, Progress cb) {
         File out = new File(ctx.getExternalFilesDir(null), "AutoAnswer_update.apk");
         try {
-            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+            HttpURLConnection con = newConn(new URL(url));
             con.setRequestProperty("Accept", "*/*");
             con.setRequestProperty("User-Agent", "Mozilla/5.0");
             con.setConnectTimeout(30000);
             con.setReadTimeout(120000);
-            con.connect();
+            int code = con.getResponseCode();
+            if (code == 407) {
+                con = newConnAuth(new URL(url));
+                con.setRequestProperty("Accept", "*/*");
+                con.setRequestProperty("User-Agent", "Mozilla/5.0");
+                con.setConnectTimeout(30000);
+                con.setReadTimeout(120000);
+            }
             InputStream is = con.getInputStream();
             // 处理 gzip
             String enc = con.getContentEncoding();
@@ -149,12 +172,52 @@ public final class UpdateHelper {
 
     // ---- 内部辅助 ----
 
+    /** 创建带本地代理的 HttpURLConnection, 自动尝试多个代理 */
+    private static HttpURLConnection newConn(URL url) throws Exception {
+        Exception lastErr = null;
+        Proxy[] proxies = {
+                new Proxy(Proxy.Type.HTTP,
+                        new InetSocketAddress(PROXY_HOST1, PROXY_PORT1)),
+                new Proxy(Proxy.Type.HTTP,
+                        new InetSocketAddress(PROXY_HOST2, PROXY_PORT2)),
+        };
+        for (Proxy p : proxies) {
+            try {
+                HttpURLConnection con = (HttpURLConnection) url.openConnection(p);
+                con.setConnectTimeout(10000);
+                con.connect();
+                return con;
+            } catch (Exception e) {
+                lastErr = e;
+            }
+        }
+        throw lastErr;
+    }
+
+    /** 创建带认证的代理连接 */
+    private static HttpURLConnection newConnAuth(URL url) throws Exception {
+        Proxy p = new Proxy(Proxy.Type.HTTP,
+                new InetSocketAddress(PROXY_HOST2, PROXY_PORT2));
+        HttpURLConnection con = (HttpURLConnection) url.openConnection(p);
+        con.setRequestProperty("Proxy-Authorization", "Basic " + PROXY_AUTH2);
+        con.setConnectTimeout(10000);
+        con.connect();
+        return con;
+    }
+
     private static JSONObject fetchJson(String urlStr, boolean auth) throws Exception {
-        HttpURLConnection con = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection con = newConn(new URL(urlStr));
         con.setRequestProperty("Accept", "application/vnd.github.v3+json");
         if (auth) con.setRequestProperty("Authorization", "Bearer " + GH_TOKEN);
-        con.setConnectTimeout(15000);
-        con.connect();
+        int code = con.getResponseCode();
+        if (code == 407) {
+            // 代理需要认证, 重试带认证的
+            con = newConnAuth(new URL(urlStr));
+            con.setRequestProperty("Accept", "application/vnd.github.v3+json");
+            if (auth) con.setRequestProperty("Authorization", "Bearer " + GH_TOKEN);
+            code = con.getResponseCode();
+        }
+        if (code != 200) return null;
         InputStream is = con.getInputStream();
         String enc = con.getContentEncoding();
         if ("gzip".equalsIgnoreCase(enc)) is = new GZIPInputStream(is);
