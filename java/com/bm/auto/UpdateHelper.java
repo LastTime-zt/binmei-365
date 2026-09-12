@@ -1,5 +1,6 @@
 package com.bm.auto;
 
+import android.os.Environment;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
@@ -95,9 +96,15 @@ public final class UpdateHelper {
         new Handler(act.getMainLooper()).post(r);
     }
 
-    /** 下载 APK 到外部存储并返回 file (调用方负责安装) */
+    /** 下载 APK 到 Download 目录并返回 file (调用方负责安装) */
     public static File downloadApk(Context ctx, String url, Progress cb) {
-        File out = new File(ctx.getExternalFilesDir(null), "AutoAnswer_update.apk");
+        // 写入公开 Download 目录，Android 10+ 需要 WRITE_EXTERNAL_STORAGE
+        File downloadDir = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "");
+        if (!downloadDir.exists() && !downloadDir.mkdirs()) {
+            downloadDir = ctx.getExternalFilesDir(null);
+        }
+        File out = new File(downloadDir, "AutoAnswer_update.apk");
         try {
             HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
             con.setRequestProperty("Accept", "*/*");
